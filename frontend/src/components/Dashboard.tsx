@@ -14,17 +14,19 @@ const trendData = [
 ];
 
 export function Dashboard() {
-  const { trains, sections, conflicts, runs } = useLiveData();
-  
+  const { trains, sections, conflicts, runs, metrics, loading, error } = useLiveData();
+
   const activeConflicts = conflicts.filter(c => !c.resolved);
   const totalDelay = trains.reduce((acc, t) => acc + t.predictedDelayMinutes, 0);
   const congestedSections = sections.filter(s => s.status === 'congested' || s.status === 'blocked').length;
 
+  const totalDelayReduced = metrics ? metrics.total_weighted_delay_minutes : runs.reduce((acc, r) => acc + r.totalDelayReduced, 0);
+
   const delayData = trains.map(t => ({
     name: t.id,
-    delay: t.predictedDelayMinutes,
+    delay: Math.round(t.predictedDelayMinutes),
     type: t.type
-  })).sort((a, b) => b.delay - a.delay);
+  })).sort((a, b) => b.delay - a.delay).slice(0, 10);
 
   return (
     <div className="p-8 space-y-8 max-w-7xl mx-auto">
@@ -83,13 +85,13 @@ export function Dashboard() {
 
         <div className="bg-white p-6 rounded-2xl border border-zinc-200 shadow-sm flex flex-col gap-4">
           <div className="flex items-center justify-between">
-            <h3 className="text-sm font-medium text-zinc-500">Delay Reduced (1h)</h3>
+            <h3 className="text-sm font-medium text-zinc-500">Delay Avoided (Cumulative)</h3>
             <div className="w-8 h-8 rounded-full bg-emerald-50 flex items-center justify-center">
               <TrendingDown className="w-4 h-4 text-emerald-500" />
             </div>
           </div>
           <div className="flex items-end gap-2">
-            <span className="text-4xl font-light text-zinc-900">195</span>
+            <span className="text-4xl font-light text-zinc-900">{Math.round(totalDelayReduced)}</span>
             <span className="text-sm text-emerald-500 font-medium mb-1">minutes saved</span>
           </div>
         </div>
@@ -111,7 +113,7 @@ export function Dashboard() {
                 <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e4e4e7" />
                 <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fill: '#71717a', fontSize: 12 }} dy={10} />
                 <YAxis axisLine={false} tickLine={false} tick={{ fill: '#71717a', fontSize: 12 }} />
-                <Tooltip 
+                <Tooltip
                   cursor={{ fill: '#f4f4f5' }}
                   contentStyle={{ borderRadius: '8px', border: '1px solid #e4e4e7', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}
                 />
@@ -156,8 +158,8 @@ export function Dashboard() {
                       <span className={cn(
                         "inline-flex items-center px-2 py-0.5 rounded text-xs font-medium",
                         conflict.severity === 'high' ? "bg-red-50 text-red-700" :
-                        conflict.severity === 'medium' ? "bg-amber-50 text-amber-700" :
-                        "bg-blue-50 text-blue-700"
+                          conflict.severity === 'medium' ? "bg-amber-50 text-amber-700" :
+                            "bg-blue-50 text-blue-700"
                       )}>
                         {conflict.severity}
                       </span>
@@ -196,11 +198,11 @@ export function Dashboard() {
                     <span className="text-[10px] font-mono text-zinc-500 bg-white px-1.5 py-0.5 rounded border border-zinc-200">{section.id}</span>
                   </div>
                   <div className="w-full h-1.5 bg-zinc-200 rounded-full mt-3 overflow-hidden">
-                    <div 
+                    <div
                       className={cn(
                         "h-full rounded-full transition-all duration-500",
                         section.congestionProbability > 0.8 ? "bg-red-500" :
-                        section.congestionProbability > 0.5 ? "bg-amber-500" : "bg-emerald-500"
+                          section.congestionProbability > 0.5 ? "bg-amber-500" : "bg-emerald-500"
                       )}
                       style={{ width: `${section.congestionProbability * 100}%` }}
                     />
@@ -210,7 +212,7 @@ export function Dashboard() {
                   <span className={cn(
                     "text-lg font-light",
                     section.congestionProbability > 0.8 ? "text-red-600" :
-                    section.congestionProbability > 0.5 ? "text-amber-600" : "text-emerald-600"
+                      section.congestionProbability > 0.5 ? "text-amber-600" : "text-emerald-600"
                   )}>
                     {(section.congestionProbability * 100).toFixed(0)}%
                   </span>

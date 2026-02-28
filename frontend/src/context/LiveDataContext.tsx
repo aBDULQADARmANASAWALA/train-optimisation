@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
-import { Train, Section, Conflict, Platform, OptimizationRun } from '../types';
-import { MOCK_TRAINS, MOCK_SECTIONS, MOCK_CONFLICTS, MOCK_PLATFORMS, MOCK_RUNS } from '../data/mockData';
+import { Train, Section, Conflict, Platform, OptimizationRun, KPIDashboard } from '../types';
+import { api } from '../api';
 
 interface LiveData {
   trains: Train[];
@@ -8,46 +8,69 @@ interface LiveData {
   conflicts: Conflict[];
   platforms: Platform[];
   runs: OptimizationRun[];
+  metrics: KPIDashboard | null;
+  loading: boolean;
+  error: string | null;
+  refreshData: () => Promise<void>;
 }
 
 const LiveDataContext = createContext<LiveData | null>(null);
 
-export function LiveDataProvider({ children }: { children: React.ReactNode }) {
-  const [data, setData] = useState<LiveData>({
-    trains: MOCK_TRAINS,
-    sections: MOCK_SECTIONS,
-    conflicts: MOCK_CONFLICTS,
-    platforms: MOCK_PLATFORMS,
-    runs: MOCK_RUNS,
+export function LiveDataProvider({ children }: { children: React.ReactNode; }) {
+  const [data, setData] = useState<{
+    trains: Train[];
+    sections: Section[];
+    conflicts: Conflict[];
+    platforms: Platform[];
+    runs: OptimizationRun[];
+    metrics: KPIDashboard | null;
+  }>({
+    trains: [],
+    sections: [],
+    conflicts: [],
+    platforms: [],
+    runs: [],
+    metrics: null,
   });
 
-  useEffect(() => {
-    // Simulate real-time updates every 3 seconds
-    const interval = setInterval(() => {
-      setData(prev => {
-        // Randomly fluctuate delays
-        const newTrains = prev.trains.map(t => ({
-          ...t,
-          predictedDelayMinutes: Math.max(0, t.predictedDelayMinutes + Math.floor(Math.random() * 3) - 1)
-        }));
-        
-        // Randomly fluctuate congestion probabilities
-        const newSections = prev.sections.map(s => {
-          const newProb = Math.min(1, Math.max(0, s.congestionProbability + (Math.random() * 0.1 - 0.05)));
-          return {
-            ...s,
-            congestionProbability: newProb,
-            status: newProb > 0.8 ? 'congested' : (newProb > 0.95 ? 'blocked' : 'clear') as Section['status']
-          };
-        });
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
-        return { ...prev, trains: newTrains, sections: newSections };
+  const refreshData = async () => {
+    try {
+      const liveState = await api.getLiveState();
+      const history = await api.getOptimizationHistory();
+      const metrics = await api.getMetrics();
+
+      setData({
+        trains: liveState.trains,
+        sections: liveState.sections,
+        conflicts: liveState.conflicts,
+        platforms: liveState.platforms,
+        runs: history,
+        metrics: metrics,
       });
-    }, 3000);
+      setError(null);
+    } catch (err: any) {
+      console.error('Failed to fetch live data:', err);
+      setError(err.message || 'Failed to connect to backend API');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    refreshData();
+    // Refresh every 5 seconds for live state
+    const interval = setInterval(refreshData, 5000);
     return () => clearInterval(interval);
   }, []);
 
-  return <LiveDataContext.Provider value={data}>{children}</LiveDataContext.Provider>;
+  return (
+    <LiveDataContext.Provider value={{ ...data, loading, error, refreshData }}>
+      {children}
+    </LiveDataContext.Provider>
+  );
 }
 
 export function useLiveData() {

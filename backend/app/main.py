@@ -133,7 +133,8 @@ async def lifespan(app: FastAPI):
             with SessionLocal() as session:
                 inspector = inspect(engine)
                 tables = inspector.get_table_names()
-                logger.info(f"Database connected. Tables: {len(tables)}")
+                logger.info(f"Database connected. Tables found: {tables}")
+                logger.info(f"Number of tables: {len(tables)}")
         except SQLAlchemyError as e:
             logger.warning(f"Database connection check failed: {e}")
             logger.warning("Server starting without confirmed DB connection")
@@ -330,12 +331,16 @@ async def error_handling_middleware(request: Request, call_next):
         return response
     except Exception as e:
         logger.error(
-            f"Unhandled error for {request.method} {request.url.path}: {e}",
+            f"!!! UNHANDLED EXCEPTION for {request.method} {request.url.path}: {str(e)}",
             exc_info=True,
         )
         return JSONResponse(
             status_code=500,
-            content={"detail": "Internal server error"},
+            content={
+                "detail": "Internal server error",
+                "exception": str(e),
+                "type": type(e).__name__
+            },
         )
 
 
@@ -354,10 +359,14 @@ def _get_cors_origins(settings) -> list:
         return [
             "http://localhost",
             "http://localhost:3000",
+            "http://localhost:3001",
+            "http://localhost:3002",
             "http://localhost:5173",  # Vite default
             "http://localhost:8080",  # Vue default
             "http://127.0.0.1",
             "http://127.0.0.1:3000",
+            "http://127.0.0.1:3001",
+            "http://127.0.0.1:3002",
             "http://127.0.0.1:5173",
             "http://127.0.0.1:8080",
         ]
