@@ -6,6 +6,7 @@ python-dotenv==1.0.0
 supabase==2.4.0
 sqlalchemy==2.0.23
 sqlalchemy-utils==0.41.1
+psycopg2-binary==2.9.9
 requests==2.31.0
 networkx==3.2.1
 ortools==9.7.2996

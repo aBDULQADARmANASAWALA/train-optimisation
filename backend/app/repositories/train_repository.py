@@ -212,6 +212,14 @@ class TrainRepository:
 
             # Update fields
             for key, value in updated_fields.items():
+                # Coerce 'status' string → TrainStatus enum so SQLAlchemy doesn't
+                # raise DataError when the simulator passes plain strings like
+                # 'delayed' or 'in_transit'.
+                if key == "status" and isinstance(value, str):
+                    try:
+                        value = TrainStatus(value)
+                    except ValueError:
+                        logger.warning(f"Unknown status value '{value}' for train {train_id} — keeping as-is")
                 setattr(state, key, value)
 
             # last_updated is automatically set by onupdate

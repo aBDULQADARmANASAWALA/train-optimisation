@@ -83,10 +83,8 @@ async def lifespan(app: FastAPI):
         # 1. Database Engine Setup
         logger.info("Initializing database engine...")
 
-        # Parse database URL from Supabase configuration
-        # In production: PostgreSQL via Supabase
-        # In testing: SQLite (if supabase_url startswith "sqlite://")
-        database_url = _parse_database_url(settings.supabase_url)
+        # Parse database URL — prefer DATABASE_URL from env, fall back to constructing from supabase_url
+        database_url = settings.database_url or _parse_database_url(settings.supabase_url)
 
         logger.debug(f"Database URL: {database_url}")
 
@@ -126,20 +124,19 @@ async def lifespan(app: FastAPI):
             Base.metadata.create_all(bind=engine)
             logger.info("Database tables created/verified")
         except Exception as e:
-            logger.error(f"Error creating tables: {e}")
-            raise
+            logger.warning(f"Could not create/verify tables (DB may be unreachable): {e}")
+            logger.warning("Server will start but DB operations will fail until connection is restored")
 
         # 3. Verify Database Connection
         logger.info("Verifying database connection...")
         try:
             with SessionLocal() as session:
-                # Simple query to verify connection
                 inspector = inspect(engine)
                 tables = inspector.get_table_names()
                 logger.info(f"Database connected. Tables: {len(tables)}")
         except SQLAlchemyError as e:
-            logger.error(f"Database connection failed: {e}")
-            raise
+            logger.warning(f"Database connection check failed: {e}")
+            logger.warning("Server starting without confirmed DB connection")
 
         # 4. Override Dependency Injection
         logger.info("Configuring dependency injection...")
@@ -452,8 +449,8 @@ async def health_ready():
         # Quick database check
         if SessionLocal:
             with SessionLocal() as session:
-                # Verify can execute a simple query
-                session.execute("SELECT 1")
+                from sqlalchemy import text as _text
+                session.execute(_text("SELECT 1"))
         return {"status": "ready"}
     except Exception as e:
         logger.error(f"Readiness probe failed: {e}")

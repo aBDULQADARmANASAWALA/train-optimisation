@@ -14,18 +14,23 @@ from sqlalchemy import (
     Text,
     TypeDecorator,
 )
+from sqlalchemy.dialects.postgresql import UUID as PostgresUUID
 
-# Custom UUID type that stores as STRING but accepts UUID objects
+# Custom UUID type that uses native UUID in PostgreSQL and VARCHAR(36) in SQLite
 class GUID(TypeDecorator):
     """Platform-independent GUID type for SQLite/PostgreSQL compatibility."""
     impl = String(36)
     cache_ok = True
 
+    def load_dialect_impl(self, dialect):
+        if dialect.name == 'postgresql':
+            return dialect.type_descriptor(PostgresUUID(as_uuid=False))
+        else:
+            return dialect.type_descriptor(String(36))
+
     def process_bind_param(self, value, dialect):
         if value is None:
             return None
-        if hasattr(value, 'hex'):  # It's a UUID object
-            return value.hex[0:8] + '-' + value.hex[8:12] + '-' + value.hex[12:16] + '-' + value.hex[16:20] + '-' + value.hex[20:32]
         return str(value)
 
     def process_result_value(self, value, dialect):
@@ -35,7 +40,6 @@ class GUID(TypeDecorator):
 class _UUIDType:
     """Flexible UUID type that adapts for different databases."""
     def __call__(self, as_uuid=False, native_uuid=False):
-        # Return GUID for SQLite compatibility
         return GUID()
 
     def __repr__(self):

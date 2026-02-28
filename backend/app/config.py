@@ -1,5 +1,6 @@
 import logging
 from functools import lru_cache
+from typing import Optional
 from pydantic_settings import BaseSettings
 from pydantic import Field, field_validator
 
@@ -16,6 +17,12 @@ class Settings(BaseSettings):
     )
     supabase_key: str = Field(
         ..., description="Supabase API key"
+    )
+
+    # Direct PostgreSQL connection string (get from Supabase dashboard > Settings > Database)
+    # Overrides the URL constructed from supabase_url when set
+    database_url: Optional[str] = Field(
+        default=None, description="Direct PostgreSQL connection string"
     )
 
     # Optimization Configuration

@@ -15,6 +15,7 @@ No business logic in routes - delegates to services.
 import logging
 from typing import Dict, Any, List, Optional
 from datetime import datetime
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
@@ -42,14 +43,21 @@ router = APIRouter(prefix="/api/v1", tags=["railway-control"])
 # ============================================================================
 
 def get_db_session() -> Session:
-    """Get database session"""
-    from sqlalchemy import create_engine
-    from sqlalchemy.orm import sessionmaker
+    """
+    Placeholder session dependency.
 
-    # In production, would use connection pool from config
-    engine = create_engine("sqlite:///:memory:")
-    SessionLocal = sessionmaker(bind=engine)
-    return SessionLocal()
+    This function is **always overridden** at startup by
+    ``main._setup_dependency_overrides()``, which replaces it with a real
+    Supabase / PostgreSQL session from the app-level connection pool.
+
+    If you see this error it means the app was not started via
+    ``uvicorn app.main:app`` (e.g. the route was called in isolation without
+    the lifespan startup running).
+    """
+    raise RuntimeError(
+        "get_db_session() was not overridden by the app startup. "
+        "Ensure the application is started via 'uvicorn app.main:app'."
+    )
 
 
 def get_train_repository(session: Session = Depends(get_db_session)) -> TrainRepository:
@@ -197,6 +205,28 @@ class HealthResponse(BaseModel):
     services: Dict[str, str]
 
 
+class ModelTrainResponse(BaseModel):
+    """Response from model training endpoint"""
+    status: str
+    delay_model_score: Optional[float] = None   # MAE in minutes (lower is better)
+    delay_samples: int = 0
+    congestion_model_score: Optional[float] = None  # AUC-ROC (higher is better)
+    congestion_samples: int = 0
+    training_time_seconds: float = 0.0
+    message: str
+
+
+class ModelStatusResponse(BaseModel):
+    """Response from model status endpoint"""
+    delay_model_trained: bool
+    delay_model_trained_at: Optional[str]
+    congestion_model_trained: bool
+    congestion_model_trained_at: Optional[str]
+    recent_prediction_errors_count: int
+    recent_mean_error: float
+    drift_threshold_mae: float
+
+
 # ============================================================================
 # Health Check
 # ============================================================================
@@ -291,19 +321,21 @@ async def get_live_state(
     Get current live network state.
 
     Returns:
-        NetworkState with all trains, sections, and utilization
+        NetworkState with all trains, sections, and real utilization
     """
     logger.debug("GET /state/live - Fetching current state")
 
     try:
         snapshot = state_engine.snapshot_state()
 
-        # Extract train info
+        # Extract train info — include priority_weight from the trains dict
         trains = [
             TrainInfo(
                 train_id=str(pos["train_id"]),
-                train_number=pos["train_number"],
-                priority_weight=pos.get("priority_weight", 1.0),
+                train_number=pos.get("train_number", ""),
+                priority_weight=state_engine.trains.get(
+                    UUID(str(pos["train_id"])), {}
+                ).get("priority_weight", 1.0),
                 status=pos.get("status", "unknown"),
                 accumulated_delay_minutes=pos.get("accumulated_delay_minutes", 0.0),
                 current_section_id=pos.get("current_section_id"),
@@ -312,21 +344,25 @@ async def get_live_state(
             for pos in snapshot.get("train_positions", [])
         ]
 
-        # Extract section loads (simplified)
-        sections = [
-            SectionLoad(
-                section_id=f"section_{i}",
-                current_occupancy=0,
-                capacity=4,
-                utilization_percent=0.0,
-            )
-            for i in range(snapshot["network_stats"]["total_sections"])
-        ]
+        # Build REAL section loads from state engine occupancy
+        section_loads = []
+        for section_id, occupants in state_engine.section_occupancy.items():
+            load_info = state_engine.get_section_load(section_id)
+            if "error" not in load_info:
+                section_loads.append(
+                    SectionLoad(
+                        section_id=str(section_id),
+                        current_occupancy=load_info.get("current_occupancy", 0),
+                        capacity=load_info.get("capacity", 1),
+                        utilization_percent=load_info.get("utilization_percent", 0.0),
+                    )
+                )
 
         occupancy = snapshot.get("occupancy_summary", {})
+        total_sections = snapshot["network_stats"]["total_sections"]
         avg_util = (
-            occupancy.get("sections_with_trains", 0) / snapshot["network_stats"]["total_sections"] * 100
-            if snapshot["network_stats"]["total_sections"] > 0
+            occupancy.get("sections_with_trains", 0) / total_sections * 100
+            if total_sections > 0
             else 0
         )
 
@@ -335,11 +371,11 @@ async def get_live_state(
             active_trains=snapshot.get("active_trains_count", 0),
             total_trains=snapshot.get("active_trains_count", 0),
             sections_occupied=occupancy.get("sections_with_trains", 0),
-            total_sections=snapshot["network_stats"]["total_sections"],
+            total_sections=total_sections,
             average_section_utilization=avg_util,
             current_conflicts=snapshot.get("conflicts", {}).get("total_conflicts", 0),
             trains=trains,
-            sections=sections,
+            sections=section_loads,
         )
 
         logger.debug(f"State fetched: {response.active_trains} trains, {response.current_conflicts} conflicts")
@@ -425,7 +461,7 @@ async def set_manual_override(
     logger.info(f"POST /override - Setting override to {request.enabled}")
 
     try:
-        orchestrator.set_manual_override(request.enabled)
+        orchestrator.set_manual_override(request.enabled, reason=request.reason)
 
         status_msg = "enabled" if request.enabled else "disabled"
         reason_msg = f" ({request.reason})" if request.reason else ""
@@ -481,4 +517,88 @@ async def get_status(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to get status: {str(e)}",
+        )
+
+
+# ============================================================================
+# ML Model Training & Status
+# ============================================================================
+
+@router.post("/ml/train", response_model=ModelTrainResponse, tags=["ml"])
+async def train_models(
+    predictor: PredictionService = Depends(get_predictor),
+) -> ModelTrainResponse:
+    """
+    Train (or retrain) the ML models from Supabase historical data.
+
+    Pulls rows from ``historical_operational_data`` and trains:
+    - ``delay_regressor``     (RandomForest, target = arrival_delay)
+    - ``congestion_classifier`` (RandomForest, target = congestion_flag)
+
+    Models are persisted to disk under ``./models/`` so subsequent
+    API requests use the newly trained versions without restarting.
+
+    Returns:
+        ModelTrainResponse with MAE / AUC-ROC scores and sample counts.
+    """
+    logger.info("POST /ml/train - Training models from Supabase historical data")
+
+    try:
+        results = predictor.train_models()
+
+        response = ModelTrainResponse(
+            status="success",
+            delay_model_score=results.get("delay_model_score"),
+            delay_samples=results.get("delay_samples", 0),
+            congestion_model_score=results.get("congestion_model_score"),
+            congestion_samples=results.get("congestion_samples", 0),
+            training_time_seconds=results.get("training_time_seconds", 0.0),
+            message=(
+                f"Training complete — "
+                f"delay MAE={results.get('delay_model_score', 'N/A')}, "
+                f"congestion AUC={results.get('congestion_model_score', 'N/A')}"
+            ),
+        )
+
+        logger.info(f"Model training succeeded: {response.message}")
+        return response
+
+    except Exception as e:
+        logger.error(f"Model training failed: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Model training failed: {str(e)}",
+        )
+
+
+@router.get("/ml/status", response_model=ModelStatusResponse, tags=["ml"])
+async def get_model_status(
+    predictor: PredictionService = Depends(get_predictor),
+) -> ModelStatusResponse:
+    """
+    Return metadata about the currently loaded ML models.
+
+    Returns:
+        ModelStatusResponse with training timestamps, recent errors, and
+        drift threshold.
+    """
+    logger.debug("GET /ml/status - Fetching model status")
+
+    try:
+        info = predictor.get_model_info()
+        return ModelStatusResponse(
+            delay_model_trained=info["delay_model_trained"],
+            delay_model_trained_at=info["delay_model_trained_at"],
+            congestion_model_trained=info["congestion_model_trained"],
+            congestion_model_trained_at=info["congestion_model_trained_at"],
+            recent_prediction_errors_count=info["recent_prediction_errors_count"],
+            recent_mean_error=float(info["recent_mean_error"]),
+            drift_threshold_mae=info["drift_threshold_mae"],
+        )
+
+    except Exception as e:
+        logger.error(f"Failed to get model status: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get model status: {str(e)}",
         )
