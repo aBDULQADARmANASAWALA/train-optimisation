@@ -14,7 +14,9 @@ Demonstrates:
 from datetime import datetime
 from uuid import uuid4, UUID
 from pathlib import Path
-
+import sys
+import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from app.services.predictor import (
     PredictionService,
     TrainFeatures,

@@ -262,6 +262,12 @@ class OptimizationService:
         - arrival_time[train_id][station_id]: arrival time in minutes from horizon_start
         - departure_time[train_id][station_id]: departure time in minutes from horizon_start
         - precedence[train_i][train_j]: binary, 1 if train_i precedes train_j on section
+
+        ML integration:
+        - Each train's bounds are offset by snapshot.predicted_delays[train_id] so the
+          solver starts from a realistic delayed position rather than the raw timetable.
+          This prevents the solver wasting time exploring solutions that are already
+          infeasible due to the current real-world delay.
         """
         logger.debug(f"Creating variables for {len(relevant_stops)} stops")
 
@@ -274,10 +280,17 @@ class OptimizationService:
         for stop in relevant_stops:
             stop_id = (stop.train_id, stop.station_id, stop.sequence)
 
+            # ── ML predicted delay offset ──────────────────────────────────
+            # If the ML model predicted this train will be N minutes late,
+            # shift the lower bound up by N so the solver's search space
+            # starts from the realistic position.
+            ml_delay = int(snapshot.predicted_delays.get(stop.train_id, 0.0))
+            ml_delay = max(0, ml_delay)  # clamp negative predictions to 0
+
             # Calculate bounds for arrival time
             scheduled_arr = stop.scheduled_arrival
-            arr_min = int((scheduled_arr - horizon_start).total_seconds() / 60)
-            arr_max = int((scheduled_arr - horizon_start).total_seconds() / 60) + 120  # Allow 2 hours delay
+            arr_min = int((scheduled_arr - horizon_start).total_seconds() / 60) + ml_delay
+            arr_max = arr_min + 120  # Allow up to 2 additional hours beyond predicted
 
             arrival_times[stop_id] = model.NewIntVar(
                 max(0, arr_min),
@@ -285,10 +298,10 @@ class OptimizationService:
                 f"arr_{stop.train_id}_{stop.station_id}_{stop.sequence}",
             )
 
-            # Departure bounds
+            # Departure bounds (also offset by ML delay)
             scheduled_dep = stop.scheduled_departure
-            dep_min = int((scheduled_dep - horizon_start).total_seconds() / 60)
-            dep_max = int((scheduled_dep - horizon_start).total_seconds() / 60) + 120
+            dep_min = int((scheduled_dep - horizon_start).total_seconds() / 60) + ml_delay
+            dep_max = dep_min + 120
 
             departure_times[stop_id] = model.NewIntVar(
                 max(0, dep_min),
@@ -468,9 +481,18 @@ class OptimizationService:
         relevant_stops: List[TrainStop],
     ) -> None:
         """
-        Set optimization objective: minimize weighted delays + congestion + conflicts.
+        Set optimization objective: minimize weighted delays + congestion penalty.
 
-        Objective = Σ(priority_weight × delay_minutes) + congestion_penalty + conflict_penalty
+        Objective = Σ(priority_weight × delay_minutes)
+                  + Σ(congestion_penalty × trains_on_congested_sections)
+
+        ML integration:
+        - snapshot.predicted_delays already shifted variable bounds (see _create_variables)
+        - snapshot.trains contains ML congestion recommendations per section (passed
+          through from the orchestrator's predictions dict via the snapshot)
+        - Sections where the ML model predicted 'high' or 'critical' congestion add
+          an extra penalty per train stop, nudging the solver to prefer departing
+          those trains earlier or routing them via less congested paths.
         """
         logger.debug("Setting objective function")
 
@@ -478,37 +500,82 @@ class OptimizationService:
         departure_times = variables["departure_times"]
         horizon_start = variables["horizon_start"]
 
-        delay_terms = []
-        total_weighted_delay = 0
+        # ── Build congestion penalty map from ML predictions ───────────────
+        # snapshot.trains may carry a 'congestion_recommendation' field written
+        # by the orchestrator from the ML congestion predictions.
+        # Penalty scale: low=0, moderate=50, high=200, critical=500
+        CONGESTION_PENALTIES = {"low": 0, "moderate": 50, "high": 200, "critical": 500}
 
-        # Create delay variables and objective terms
+        # Map section_id → congestion penalty (from ML)
+        section_congestion_penalty: Dict[UUID, int] = {}
+        for section in snapshot.sections:
+            sec_id = section.section_id
+            # The orchestrator stores congestion recommendation in snapshot.trains
+            # under a special key if a section was flagged
+            penalty_key = f"congestion_penalty_{sec_id}"
+            for train_info in snapshot.trains.values():
+                rec = train_info.get(penalty_key)
+                if rec and rec in CONGESTION_PENALTIES:
+                    section_congestion_penalty[sec_id] = CONGESTION_PENALTIES[rec]
+                    break
+
+        # Map (from_station_id, to_station_id) → section_id for quick lookup
+        section_by_stations: Dict[Tuple[UUID, UUID], UUID] = {
+            (s.from_station_id, s.to_station_id): s.section_id
+            for s in snapshot.sections
+        }
+
+        # Group stops by train for travel section lookup
+        train_stops_map = self._group_stops_by_train(relevant_stops)
+
+        delay_terms = []
+
+        # ── Delay + congestion terms per stop ──────────────────────────────
         for stop in relevant_stops:
             stop_id = (stop.train_id, stop.station_id, stop.sequence)
 
-            if stop_id in arrival_times:
-                scheduled_arr_offset = int((stop.scheduled_arrival - horizon_start).total_seconds() / 60)
-                actual_arr = arrival_times[stop_id]
+            if stop_id not in arrival_times:
+                continue
 
-                # Delay = max(0, actual - scheduled)
-                delay_var = model.NewIntVar(0, 1000, f"delay_{stop.train_id}_{stop.station_id}")
-                model.Add(delay_var >= actual_arr - scheduled_arr_offset)
-                model.Add(delay_var >= 0)
+            scheduled_arr_offset = int((stop.scheduled_arrival - horizon_start).total_seconds() / 60)
+            actual_arr = arrival_times[stop_id]
 
-                # Weight by train priority
-                train_priority = snapshot.trains.get(stop.train_id, {}).get("priority_weight", 1.0)
-                weight = int(train_priority * 100)  # Convert to integer
+            # Delay = max(0, actual - scheduled)
+            delay_var = model.NewIntVar(0, 1000, f"delay_{stop.train_id}_{stop.station_id}")
+            model.Add(delay_var >= actual_arr - scheduled_arr_offset)
+            model.Add(delay_var >= 0)
 
-                delay_terms.append((delay_var, weight))
-                total_weighted_delay += weight
+            # Base weight: train priority
+            train_priority = snapshot.trains.get(stop.train_id, {}).get("priority_weight", 1.0)
+            weight = int(train_priority * 100)
 
-        # Minimize: sum of (weight × delay)
-        weighted_delays = []
-        for delay_var, weight in delay_terms:
-            weighted_delays.append(delay_var * weight)
+            # ── Congestion penalty: find the section leading INTO this stop ──
+            # If the section the train must traverse to reach this stop is
+            # predicted congested by ML, increase the weight so reducing delay
+            # on that section matters more to the solver.
+            stops_for_train = train_stops_map.get(stop.train_id, [])
+            stops_for_train.sort(key=lambda s: s.sequence)
+            for i, s in enumerate(stops_for_train):
+                if s.station_id == stop.station_id and i > 0:
+                    prev_station = stops_for_train[i - 1].station_id
+                    sec_id = section_by_stations.get((prev_station, stop.station_id))
+                    if sec_id and sec_id in section_congestion_penalty:
+                        weight += section_congestion_penalty[sec_id]
+                        logger.debug(
+                            f"Train {stop.train_number} stop at {stop.station_name}: "
+                            f"+{section_congestion_penalty[sec_id]} congestion penalty"
+                        )
+                    break
 
-        if weighted_delays:
-            model.Minimize(sum(weighted_delays))
-            logger.debug(f"Objective: minimize sum of {len(weighted_delays)} weighted delays")
+            delay_terms.append((delay_var, weight))
+
+        # ── Minimize total weighted delay (includes congestion penalties) ──
+        if delay_terms:
+            model.Minimize(sum(dv * w for dv, w in delay_terms))
+            logger.debug(
+                f"Objective: minimize {len(delay_terms)} weighted delay terms "
+                f"(incl. congestion penalties on {len(section_congestion_penalty)} sections)"
+            )
         else:
             logger.warning("No delay terms in objective")
 
@@ -521,22 +588,36 @@ class OptimizationService:
         """
         Apply warm start hints from previous solution.
 
+        Provides CP-SAT with variable hints from the last solution so it
+        can skip already-explored regions of the search space.
+
         Args:
             model: CP-SAT model
             variables: Variable dictionary
-            last_solution: Previous solution
+            last_solution: Previous solution (from _store_solution)
 
         Returns:
-            True if warm start was applied successfully
+            True if at least one hint was applied
         """
         try:
-            for var_name, var_val in last_solution.items():
-                # Find corresponding variable in current model
-                # This is simplified; real implementation would track variable references
-                pass
+            arrival_times  = variables["arrival_times"]
+            departure_times = variables["departure_times"]
+            hints_applied = 0
 
-            logger.debug("Warm start hints provided to solver")
-            return True
+            for stop_id, var in arrival_times.items():
+                key = f"arr_{stop_id}"
+                if key in last_solution:
+                    model.AddHint(var, last_solution[key])
+                    hints_applied += 1
+
+            for stop_id, var in departure_times.items():
+                key = f"dep_{stop_id}"
+                if key in last_solution:
+                    model.AddHint(var, last_solution[key])
+                    hints_applied += 1
+
+            logger.debug(f"Warm start: applied {hints_applied} variable hints to solver")
+            return hints_applied > 0
 
         except Exception as e:
             logger.warning(f"Could not apply warm start: {str(e)}")
@@ -598,9 +679,21 @@ class OptimizationService:
             train_priority = snapshot.trains.get(stop.train_id, {}).get("priority_weight", 1.0)
             total_weighted_delay += train_priority * max(0, delay_minutes)
 
+        # Count conflicts resolved: precedence decisions made (prec_var = 1 means train_i forced before train_j)
+        precedence_vars = variables.get("precedence_vars", {})
+        conflicts_resolved = 0
+        try:
+            for (train_i, train_j, section_id), prec_var in precedence_vars.items():
+                val = solver.Value(prec_var)
+                if val == 1:
+                    conflicts_resolved += 1
+        except Exception:
+            pass  # Solver may not have values for unused vars
+
         logger.info(
             f"Solution extracted: {len(trains_adjusted)} trains adjusted, "
-            f"total weighted delay: {total_weighted_delay:.2f} min"
+            f"total weighted delay: {total_weighted_delay:.2f} min, "
+            f"conflicts resolved: {conflicts_resolved}"
         )
 
         return OptimizedSchedule(
@@ -611,7 +704,7 @@ class OptimizationService:
             solver_runtime_seconds=solver_runtime,
             objective_value=solver.ObjectiveValue() if is_optimal else None,
             total_weighted_delay=total_weighted_delay,
-            conflicts_resolved=0,  # Count from precedence variables
+            conflicts_resolved=conflicts_resolved,
             trains_adjusted=len(trains_adjusted),
             adjusted_timings=adjusted_timings,
             infeasibility_reasons=infeasibility_reasons,
@@ -664,11 +757,59 @@ class OptimizationService:
         return reasons
 
     # Helper methods
-    def _group_trains_by_section(self, stops: List[TrainStop]) -> Dict[UUID, List[Tuple[UUID, TrainStop]]]:
-        """Group trains by section they traverse"""
-        result: Dict[UUID, List[Tuple[UUID, TrainStop]]] = {}
-        # This is simplified; real impl would match stops to sections
-        return result
+    def _group_trains_by_section(
+        self,
+        stops: List[TrainStop],
+    ) -> Dict[UUID, List[Tuple[UUID, "TrainStop"]]]:
+        """
+        Group trains by the sections they traverse.
+
+        For each consecutive pair of stops (stop_i → stop_i+1) belonging to
+        the same train, the pair is mapped to the section whose
+        (from_station_id, to_station_id) matches that leg.  Because sections
+        are looked up by station pair rather than a pre-built section map
+        here (we don't have snapshot in scope), we use station-pair tuples as
+        the section key so the caller can still build precedence variables.
+
+        Returns:
+            Dict mapping section_id (or station-pair UUID proxy) to list of
+            (train_id, departure_stop) tuples for trains traversing it.
+        """
+        # Build per-train ordered stop list
+        train_stop_map: Dict[UUID, List[TrainStop]] = {}
+        for stop in stops:
+            train_stop_map.setdefault(stop.train_id, []).append(stop)
+        for lst in train_stop_map.values():
+            lst.sort(key=lambda s: s.sequence)
+
+        # Map (from_station_id, to_station_id) → [(train_id, stop_at_from)]
+        # We use a composite UUID-like key derived from the two station IDs
+        section_map: Dict[UUID, List[Tuple[UUID, TrainStop]]] = {}
+
+        for train_id, train_stops_list in train_stop_map.items():
+            for i in range(len(train_stops_list) - 1):
+                dep_stop  = train_stops_list[i]      # departing from dep_stop.station_id
+                arr_stop  = train_stops_list[i + 1]  # arriving at arr_stop.station_id
+
+                # Create a deterministic proxy key from station pair
+                from_id = dep_stop.station_id
+                to_id   = arr_stop.station_id
+                # XOR bytes to get a stable UUID for this directed station pair
+                import uuid as _uuid
+                key = _uuid.UUID(
+                    bytes=bytes(
+                        a ^ b
+                        for a, b in zip(from_id.bytes, to_id.bytes)
+                    )
+                )
+
+                section_map.setdefault(key, []).append((train_id, dep_stop))
+
+        logger.debug(
+            f"_group_trains_by_section: {len(section_map)} sections, "
+            f"{sum(len(v) for v in section_map.values())} train-section assignments"
+        )
+        return section_map
 
     def _group_stops_by_train(self, stops: List[TrainStop]) -> Dict[UUID, List[TrainStop]]:
         """Group stops by train"""

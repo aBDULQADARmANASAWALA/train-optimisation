@@ -17,7 +17,9 @@ from uuid import uuid4, UUID
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-
+import sys
+import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from app.models import Base, Station, Section, Train, TrainSchedule, TrainState, TrainStatus
 from app.repositories import TrainRepository, SectionRepository
 from app.services import (

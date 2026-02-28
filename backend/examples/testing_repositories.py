@@ -14,7 +14,9 @@ from datetime import datetime, timedelta
 from uuid import UUID
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-
+import sys
+import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from app.models import Base
 from app.repositories import TrainRepository, SectionRepository
 
@@ -138,12 +140,12 @@ def example_bulk_update_train_states(train_repo: TrainRepository, sample_train_i
     # Prepare batch updates
     updates = [
         {
-            "train_id": train_ids[0],
+            "train_id": sample_train_ids[0],
             "status": "in_transit",
             "accumulated_delay_minutes": 2.0,
         },
         {
-            "train_id": train_ids[1],
+            "train_id": sample_train_ids[1],
             "status": "delayed",
             "accumulated_delay_minutes": 10.5,
         },

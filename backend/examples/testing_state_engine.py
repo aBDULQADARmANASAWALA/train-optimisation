@@ -15,7 +15,9 @@ from datetime import datetime, timedelta
 from uuid import uuid4, UUID
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-
+import sys
+import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from app.models import Base, Station, Section, Train, TrainSchedule, TrainState, TrainStatus, SignallingType
 from app.repositories import TrainRepository, SectionRepository
 from app.services import RailwayStateEngine
@@ -211,7 +213,7 @@ def example_get_section_load(engine: RailwayStateEngine):
     # Get first section from graph
     if engine.graph.number_of_edges() > 0:
         first_edge = list(engine.graph.edges(data=True))[0]
-        section_id = UUID(first_edge[2]["section_id"])
+        section_id = first_edge[2]["section_id"]
 
         load = engine.get_section_load(section_id)
 

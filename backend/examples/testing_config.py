@@ -7,7 +7,9 @@ Demonstrates how to:
 - Initialize logging
 - Handle validation errors
 """
-
+import sys
+import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from app.config import settings, configure_logging, get_settings
 import logging
 
