@@ -391,53 +391,71 @@ async def get_live_state(
                 )
 
         # Build platform info from state engine
+        # platform_occupancy: Dict[station_id, List[Tuple[train_id, arrival, departure]]]
         platforms = []
-        for station_id, occupants in state_engine.platform_occupancy.items():
-            # Get station properties from graph
-            station_props = state_engine.graph.nodes.get(station_id, {}).get("properties", {})
-            station_name = station_props.get("name", f"Station {str(station_id)[:4]}")
-            
-            # Since we don't have separate platform entities, we simulate them 
-            # based on occupancy and total_platforms.
-            total_platforms = station_props.get("total_platforms", 4)
-            
-            for i in range(1, total_platforms + 1):
-                occupant_id = None
-                if i <= len(occupants):
-                    occupant_id = str(occupants[i-1][0])
-                
-                platforms.append(
-                    PlatformInfo(
-                        id=f"P-{str(station_id)[:4]}-{i}",
-                        station_name=station_name,
-                        platform_number=str(i),
-                        is_occupied=occupant_id is not None,
-                        occupying_train_id=occupant_id
+        try:
+            for station_id, occupants in state_engine.platform_occupancy.items():
+                # Try to get station name from sections/trains context
+                station_id_str = str(station_id)
+                station_name = f"Station {station_id_str[:8]}"
+
+                # Try to read name from the stations dict if available
+                station_info = getattr(state_engine, "stations", {}).get(station_id, {})
+                if isinstance(station_info, dict):
+                    station_name = station_info.get("name", station_name)
+                elif hasattr(station_info, "name"):
+                    station_name = station_info.name
+
+                # Each occupant is Tuple[train_id UUID, arrival datetime, departure datetime]
+                # Simulate platforms: occupied slot index = train slot in the list
+                # We show up to 4 platform slots per station (or actual count)
+                total_platforms = max(4, len(occupants))
+                for i in range(1, total_platforms + 1):
+                    occupant_id = None
+                    if i <= len(occupants):
+                        try:
+                            occupant_id = str(occupants[i - 1][0])  # train_id from tuple
+                        except (IndexError, TypeError):
+                            occupant_id = None
+
+                    platforms.append(
+                        PlatformInfo(
+                            id=f"P-{station_id_str[:8]}-{i}",
+                            station_name=station_name,
+                            platform_number=str(i),
+                            is_occupied=occupant_id is not None,
+                            occupying_train_id=occupant_id,
+                        )
                     )
-                )
+        except Exception as platform_exc:
+            logger.warning(f"Could not build platform info: {platform_exc}")
+            # Return empty platforms rather than crashing the whole endpoint
 
         # Map conflicts
         conflicts_snap = snapshot.get("conflicts", {})
         conflicts = []
-        
+
         # Capacity conflicts
         for c in conflicts_snap.get("capacity_conflicts", []):
+            sec_id_str = str(c.get("section_id", ""))[:8]
             conflicts.append(ConflictInfo(
-                id=f"CAP-{c['section_id'][:4]}-{datetime.utcnow().timestamp()}",
+                id=f"CAP-{sec_id_str}-{int(datetime.utcnow().timestamp())}",
                 type="capacity",
-                location=c['section_id'],
-                trains_involved=c['train_ids'],
-                severity="high" if c['current_occupancy'] > c['capacity'] else "medium",
-                resolved=False
+                location=str(c.get("section_id", "")),
+                trains_involved=[str(t) for t in c.get("train_ids", [])],
+                severity="high" if c.get("current_occupancy", 0) > c.get("capacity", 1) else "medium",
+                resolved=False,
             ))
-            
+
         # Headway conflicts
         for c in conflicts_snap.get("headway_conflicts", []):
+            sec_id_str = str(c.get("section_id", ""))[:8]
             conflicts.append(ConflictInfo(
-                id=f"HDW-{c['section_id'][:4]}-{datetime.utcnow().timestamp()}",
+                id=f"HDW-{sec_id_str}-{int(datetime.utcnow().timestamp())}",
                 type="headway",
-                location=c['section_id'],
-                trains_involved=c['train_pair'],
+                location=str(c.get("section_id", "")),
+                trains_involved=[str(t) for t in c.get("train_pair", [])],
+
                 severity="medium",
                 resolved=False
             ))

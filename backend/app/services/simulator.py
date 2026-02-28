@@ -584,7 +584,7 @@ class SimulationOrchestrator:
                         train_number=train_info.get("train_number", "UNKNOWN"),
                         station_id=UUID(stop["station_id"]),
                         station_name=stop.get("station_name", ""),
-                        sequence=stop.get("sequence", 0),
+                        stop_order=stop.get("stop_order", 0),
                         scheduled_arrival=effective_arr,
                         scheduled_departure=effective_dep,
                         platform_dwell_time_minutes=max(

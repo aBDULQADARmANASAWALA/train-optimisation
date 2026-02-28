@@ -65,10 +65,10 @@ class TrainStatus(str, enum.Enum):
 
 
 class SignallingType(str, enum.Enum):
-    """Train signalling/control system types"""
-    AUTOMATIC = "automatic"
-    MANUAL = "manual"
-    MIXED = "mixed"
+    """Train signalling/control system types — values match Supabase DB storage exactly"""
+    AUTOMATIC = "Automatic"
+    MANUAL = "Manual"
+    MIXED = "Mixed"
 
 
 class Station(Base):
@@ -82,7 +82,6 @@ class Station(Base):
         latitude: GPS latitude coordinate
         longitude: GPS longitude coordinate
         created_at: Timestamp when record was created
-        updated_at: Timestamp when record was last updated
     """
     __tablename__ = "stations"
 
@@ -92,7 +91,6 @@ class Station(Base):
     latitude = Column(Float, nullable=False)
     longitude = Column(Float, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
     # Relationships
     sections_from = relationship(
@@ -106,16 +104,6 @@ class Station(Base):
         foreign_keys="Section.to_station_id",
         back_populates="station_to",
         cascade="all, delete-orphan",
-    )
-    trains_originating = relationship(
-        "Train",
-        foreign_keys="Train.origin_id",
-        back_populates="origin_station",
-    )
-    trains_destinating = relationship(
-        "Train",
-        foreign_keys="Train.destination_id",
-        back_populates="destination_station",
     )
     schedules = relationship(
         "TrainSchedule",
@@ -147,7 +135,6 @@ class Section(Base):
         travel_time_minutes: Standard travel time through section (minutes)
         signalling_type: Type of signalling system used
         created_at: Timestamp when record was created
-        updated_at: Timestamp when record was last updated
     """
     __tablename__ = "sections"
 
@@ -167,9 +154,8 @@ class Section(Base):
     capacity = Column(Integer, nullable=False, default=1)
     headway_minutes = Column(Float, nullable=False, default=5.0)
     travel_time_minutes = Column(Float, nullable=False, default=10.0)
-    signalling_type = Column(SQLEnum(SignallingType), nullable=False, default=SignallingType.AUTOMATIC)
+    signalling_type = Column(String(50), nullable=False, default="Automatic")
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
     # Relationships
     station_from = relationship(
@@ -201,43 +187,23 @@ class Train(Base):
     Attributes:
         id: Unique UUID identifier
         train_number: Human-readable train identifier (e.g., "IC101")
+        train_type: Type of train (passenger, freight, etc.)
         priority_weight: Priority score for scheduling (higher = more important)
-        origin_id: UUID of origin station (foreign key)
-        destination_id: UUID of destination station (foreign key)
+        max_speed_kmph: Maximum speed in km/h
+        rake_length: Length of the train
         created_at: Timestamp when record was created
-        updated_at: Timestamp when record was last updated
     """
     __tablename__ = "trains"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4, nullable=False)
     train_number = Column(String(50), nullable=False, unique=True, index=True)
+    train_type = Column(String(50), nullable=True)
     priority_weight = Column(Float, nullable=False, default=1.0)
-    origin_id = Column(
-        UUID(as_uuid=True),
-        ForeignKey("stations.id", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
-    )
-    destination_id = Column(
-        UUID(as_uuid=True),
-        ForeignKey("stations.id", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
-    )
+    max_speed_kmph = Column(Float, nullable=True)
+    rake_length = Column(Float, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
     # Relationships
-    origin_station = relationship(
-        "Station",
-        foreign_keys=[origin_id],
-        back_populates="trains_originating",
-    )
-    destination_station = relationship(
-        "Station",
-        foreign_keys=[destination_id],
-        back_populates="trains_destinating",
-    )
     schedules = relationship(
         "TrainSchedule",
         back_populates="train",
@@ -286,17 +252,16 @@ class TrainSchedule(Base):
     )
     scheduled_arrival = Column(DateTime, nullable=False)
     scheduled_departure = Column(DateTime, nullable=False)
-    sequence = Column(Integer, nullable=False, default=0)
+    stop_order = Column(Integer, nullable=False, default=0)
+    platform_preference = Column(String(50), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
-
     # Relationships
     train = relationship("Train", back_populates="schedules")
     station = relationship("Station", back_populates="schedules")
 
     __table_args__ = (
-        UniqueConstraint("train_id", "station_id", "sequence", name="uq_train_schedule"),
-        Index("idx_train_schedule_train_stop", "train_id", "sequence"),
+        UniqueConstraint("train_id", "station_id", "stop_order", name="uq_train_schedule"),
+        Index("idx_train_schedule_train_stop", "train_id", "stop_order"),
         Index("idx_train_schedule_times", "scheduled_arrival", "scheduled_departure"),
     )
 

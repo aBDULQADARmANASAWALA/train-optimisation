@@ -27,7 +27,7 @@ class TrainStop:
     train_number: str
     station_id: UUID
     station_name: str
-    sequence: int
+    stop_order: int
     scheduled_arrival: datetime
     scheduled_departure: datetime
     platform_dwell_time_minutes: float = 5.0
@@ -278,7 +278,7 @@ class OptimizationService:
         precedence_vars = {}
 
         for stop in relevant_stops:
-            stop_id = (stop.train_id, stop.station_id, stop.sequence)
+            stop_id = (stop.train_id, stop.station_id, stop.stop_order)
 
             # ── ML predicted delay offset ──────────────────────────────────
             # If the ML model predicted this train will be N minutes late,
@@ -295,7 +295,7 @@ class OptimizationService:
             arrival_times[stop_id] = model.NewIntVar(
                 max(0, arr_min),
                 min(horizon_length, max(arr_max, arr_min + 1)),
-                f"arr_{stop.train_id}_{stop.station_id}_{stop.sequence}",
+                f"arr_{stop.train_id}_{stop.station_id}_{stop.stop_order}",
             )
 
             # Departure bounds (also offset by ML delay)
@@ -306,7 +306,7 @@ class OptimizationService:
             departure_times[stop_id] = model.NewIntVar(
                 max(0, dep_min),
                 min(horizon_length, max(dep_max, dep_min + 1)),
-                f"dep_{stop.train_id}_{stop.station_id}_{stop.sequence}",
+                f"dep_{stop.train_id}_{stop.station_id}_{stop.stop_order}",
             )
 
         # Create precedence variables for trains on same sections (for headway/capacity)
@@ -361,14 +361,14 @@ class OptimizationService:
         # Constraint 1: Continuity (arrival <= departure at each stop)
         logger.debug("Adding continuity constraints")
         for stop in relevant_stops:
-            stop_id = (stop.train_id, stop.station_id, stop.sequence)
+            stop_id = (stop.train_id, stop.station_id, stop.stop_order)
             if stop_id in arrival_times and stop_id in departure_times:
                 model.Add(arrival_times[stop_id] <= departure_times[stop_id])
 
         # Constraint 2: Dwell time at station
         logger.debug("Adding dwell time constraints")
         for stop in relevant_stops:
-            stop_id = (stop.train_id, stop.station_id, stop.sequence)
+            stop_id = (stop.train_id, stop.station_id, stop.stop_order)
             if stop_id in departure_times and stop_id in arrival_times:
                 dwell_minutes = int(stop.platform_dwell_time_minutes)
                 model.Add(
@@ -379,8 +379,8 @@ class OptimizationService:
         logger.debug("Adding travel time constraints")
         train_stops = self._group_stops_by_train(relevant_stops)
         for train_id, stops_list in train_stops.items():
-            # Sort by sequence
-            stops_list.sort(key=lambda x: x.sequence)
+            # Sort by stop_order
+            stops_list.sort(key=lambda x: x.stop_order)
 
             for i in range(len(stops_list) - 1):
                 stop1 = stops_list[i]
@@ -391,8 +391,8 @@ class OptimizationService:
                 if section:
                     travel_time = int(section.travel_time_minutes)
 
-                    stop1_id = (stop1.train_id, stop1.station_id, stop1.sequence)
-                    stop2_id = (stop2.train_id, stop2.station_id, stop2.sequence)
+                    stop1_id = (stop1.train_id, stop1.station_id, stop1.stop_order)
+                    stop2_id = (stop2.train_id, stop2.station_id, stop2.stop_order)
 
                     if stop1_id in departure_times and stop2_id in arrival_times:
                         # Departure from stop1 + travel time <= Arrival at stop2
@@ -437,16 +437,16 @@ class OptimizationService:
                         train_i, stop_i = train_list[i]
                         train_j, stop_j = train_list[j]
 
-                        stop_i_id = (train_i, stop_i.station_id, stop_i.sequence)
-                        stop_j_id = (train_j, stop_j.station_id, stop_j.sequence)
+                        stop_i_id = (train_i, stop_i.station_id, stop_i.stop_order)
+                        stop_j_id = (train_j, stop_j.station_id, stop_j.stop_order)
 
                         # Get next stop (end of section)
                         stop_i_next = self._get_next_stop(train_stops.get(train_i, []), stop_i)
                         stop_j_next = self._get_next_stop(train_stops.get(train_j, []), stop_j)
 
                         if stop_i_next and stop_j_next:
-                            stop_i_next_id = (train_i, stop_i_next.station_id, stop_i_next.sequence)
-                            stop_j_next_id = (train_j, stop_j_next.station_id, stop_j_next.sequence)
+                            stop_i_next_id = (train_i, stop_i_next.station_id, stop_i_next.stop_order)
+                            stop_j_next_id = (train_j, stop_j_next.station_id, stop_j_next.stop_order)
 
                             if all(
                                 sid in departure_times
@@ -532,7 +532,7 @@ class OptimizationService:
 
         # ── Delay + congestion terms per stop ──────────────────────────────
         for stop in relevant_stops:
-            stop_id = (stop.train_id, stop.station_id, stop.sequence)
+            stop_id = (stop.train_id, stop.station_id, stop.stop_order)
 
             if stop_id not in arrival_times:
                 continue
@@ -554,7 +554,7 @@ class OptimizationService:
             # predicted congested by ML, increase the weight so reducing delay
             # on that section matters more to the solver.
             stops_for_train = train_stops_map.get(stop.train_id, [])
-            stops_for_train.sort(key=lambda s: s.sequence)
+            stops_for_train.sort(key=lambda s: s.stop_order)
             for i, s in enumerate(stops_for_train):
                 if s.station_id == stop.station_id and i > 0:
                     prev_station = stops_for_train[i - 1].station_id
@@ -646,7 +646,7 @@ class OptimizationService:
         trains_adjusted = set()
 
         for stop in relevant_stops:
-            stop_id = (stop.train_id, stop.station_id, stop.sequence)
+            stop_id = (stop.train_id, stop.station_id, stop.stop_order)
 
             if stop_id not in arrival_times or stop_id not in departure_times:
                 continue
@@ -663,13 +663,13 @@ class OptimizationService:
                 adjusted_timings[stop.train_id] = []
 
             adjusted_timings[stop.train_id].append({
-                "sequence": stop.sequence,
+                "stop_order": stop.stop_order,
                 "station_id": str(stop.station_id),
                 "station_name": stop.station_name,
-                "scheduled_arrival": stop.scheduled_arrival.isoformat(),
-                "adjusted_arrival": adjusted_arrival.isoformat(),
-                "scheduled_departure": stop.scheduled_departure.isoformat(),
-                "adjusted_departure": adjusted_departure.isoformat(),
+                "scheduled_arrival": stop.scheduled_arrival.isoformat() if stop.scheduled_arrival else None,
+                "adjusted_arrival": adjusted_arrival.isoformat() if adjusted_arrival else None,
+                "scheduled_departure": stop.scheduled_departure.isoformat() if stop.scheduled_departure else None,
+                "adjusted_departure": adjusted_departure.isoformat() if adjusted_departure else None,
                 "delay_minutes": round(delay_minutes, 2),
             })
 
@@ -725,7 +725,7 @@ class OptimizationService:
         departure_times = variables["departure_times"]
 
         for stop in relevant_stops:
-            stop_id = (stop.train_id, stop.station_id, stop.sequence)
+            stop_id = (stop.train_id, stop.station_id, stop.stop_order)
             if stop_id in arrival_times:
                 solution[f"arr_{stop_id}"] = solver.Value(arrival_times[stop_id])
             if stop_id in departure_times:
@@ -780,7 +780,7 @@ class OptimizationService:
         for stop in stops:
             train_stop_map.setdefault(stop.train_id, []).append(stop)
         for lst in train_stop_map.values():
-            lst.sort(key=lambda s: s.sequence)
+            lst.sort(key=lambda s: s.stop_order)
 
         # Map (from_station_id, to_station_id) → [(train_id, stop_at_from)]
         # We use a composite UUID-like key derived from the two station IDs
@@ -851,6 +851,6 @@ class OptimizationService:
     def _get_next_stop(self, stops: List[TrainStop], current: TrainStop) -> Optional[TrainStop]:
         """Get next stop after current"""
         for stop in stops:
-            if stop.sequence == current.sequence + 1:
+            if stop.stop_order == current.stop_order + 1:
                 return stop
         return None

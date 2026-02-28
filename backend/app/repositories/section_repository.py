@@ -58,7 +58,7 @@ class SectionRepository:
                     "capacity": section.capacity,
                     "headway_minutes": section.headway_minutes,
                     "travel_time_minutes": section.travel_time_minutes,
-                    "signalling_type": section.signalling_type.value if section.signalling_type else None,
+                    "signalling_type": section.signalling_type.value if hasattr(section.signalling_type, 'value') else section.signalling_type,
                 })
 
             return result
@@ -100,7 +100,7 @@ class SectionRepository:
                 "capacity": section.capacity,
                 "headway_minutes": section.headway_minutes,
                 "travel_time_minutes": section.travel_time_minutes,
-                "signalling_type": section.signalling_type.value if section.signalling_type else None,
+                    "signalling_type": section.signalling_type.value if hasattr(section.signalling_type, 'value') else section.signalling_type,
             }
 
         except SQLAlchemyError as e:
@@ -133,7 +133,7 @@ class SectionRepository:
                     "capacity": section.capacity,
                     "headway_minutes": section.headway_minutes,
                     "travel_time_minutes": section.travel_time_minutes,
-                    "signalling_type": section.signalling_type.value if section.signalling_type else None,
+                        "signalling_type": section.signalling_type.value if hasattr(section.signalling_type, 'value') else section.signalling_type,
                 })
 
             return result
@@ -168,7 +168,7 @@ class SectionRepository:
                     "capacity": section.capacity,
                     "headway_minutes": section.headway_minutes,
                     "travel_time_minutes": section.travel_time_minutes,
-                    "signalling_type": section.signalling_type.value if section.signalling_type else None,
+                        "signalling_type": section.signalling_type.value if hasattr(section.signalling_type, 'value') else section.signalling_type,
                 })
 
             return result
@@ -211,7 +211,7 @@ class SectionRepository:
                 "capacity": section.capacity,
                 "headway_minutes": section.headway_minutes,
                 "travel_time_minutes": section.travel_time_minutes,
-                "signalling_type": section.signalling_type.value if section.signalling_type else None,
+                "signalling_type": section.signalling_type.value if hasattr(section.signalling_type, 'value') else section.signalling_type,
             }
 
         except SQLAlchemyError as e:

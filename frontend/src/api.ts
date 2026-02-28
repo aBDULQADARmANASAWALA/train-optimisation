@@ -1,6 +1,6 @@
 import { NetworkState, OptimizationRun, KPIDashboard, Train, Section } from './types';
 
-const API_BASE_URL = 'http://localhost:8000/api/v1';
+const API_BASE_URL = 'http://localhost:8010/api/v1';
 
 async function fetchWithRetry(url: string, options: RequestInit = {}): Promise<Response> {
     const response = await fetch(url, options);

@@ -90,13 +90,20 @@ async def lifespan(app: FastAPI):
 
         # Create engine with connection pooling
         if database_url.startswith("postgresql"):
-            # Production: PostgreSQL with connection pool
+            # Supabase free tier has a hard limit of ~10 connections in session mode.
+            # With hot-reload and multiple services, we must keep the pool very small.
+            # pool_size=3: max 3 persistent connections (well under the 10-connection limit)
+            # max_overflow=2: allow 2 extra temporary connections under load
+            # pool_recycle=300: close and replace connections older than 5 minutes
+            #   to prevent stale connections after hot-reloads or network blips
+            # pool_pre_ping=True: test connection health before using from pool
             engine = create_engine(
                 database_url,
                 poolclass=QueuePool,
-                pool_size=20,
-                max_overflow=40,
-                pool_pre_ping=True,  # Verify connections before using
+                pool_size=3,
+                max_overflow=2,
+                pool_recycle=300,
+                pool_pre_ping=True,
                 echo=False,
             )
         else:

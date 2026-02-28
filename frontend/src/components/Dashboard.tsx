@@ -23,7 +23,7 @@ export function Dashboard() {
   const totalDelayReduced = metrics ? metrics.total_weighted_delay_minutes : runs.reduce((acc, r) => acc + r.totalDelayReduced, 0);
 
   const delayData = trains.map(t => ({
-    name: t.id,
+    name: t.name || t.id,
     delay: Math.round(t.predictedDelayMinutes),
     type: t.type
   })).sort((a, b) => b.delay - a.delay).slice(0, 10);
@@ -107,7 +107,7 @@ export function Dashboard() {
             </div>
             <Clock className="w-4 h-4 text-zinc-400" />
           </div>
-          <div className="h-[250px] w-full">
+          <div className="w-full" style={{ height: 250, minHeight: 250, minWidth: 0 }}>
             <ResponsiveContainer width="100%" height="100%">
               <BarChart data={delayData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
                 <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e4e4e7" />

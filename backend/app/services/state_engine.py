@@ -284,8 +284,8 @@ class RailwayStateEngine:
             "occupying_trains": [
                 {
                     "train_id": str(train_id),
-                    "arrival_time": arrival.isoformat(),
-                    "departure_time": departure.isoformat(),
+                    "arrival_time": arrival.isoformat() if arrival else None,
+                    "departure_time": departure.isoformat() if departure else None,
                 }
                 for train_id, arrival, departure in occupants
             ],

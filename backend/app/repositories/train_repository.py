@@ -40,7 +40,7 @@ class TrainRepository:
 
         Returns:
             List of train dictionaries with fields: id, train_number, priority_weight,
-            origin_id, destination_id, status, accumulated_delay_minutes
+            train_type, status, accumulated_delay_minutes
 
         Raises:
             Exception: Database query error
@@ -63,8 +63,9 @@ class TrainRepository:
                     "id": str(train.id),
                     "train_number": train.train_number,
                     "priority_weight": train.priority_weight,
-                    "origin_id": str(train.origin_id),
-                    "destination_id": str(train.destination_id),
+                    "train_type": train.train_type,
+                    "max_speed_kmph": train.max_speed_kmph,
+                    "rake_length": train.rake_length,
                     "status": state.status.value if state else TrainStatus.SCHEDULED.value,
                     "accumulated_delay_minutes": state.accumulated_delay_minutes if state else 0.0,
                 })
@@ -102,7 +103,7 @@ class TrainRepository:
             schedules = (
                 self.session.query(TrainSchedule)
                 .filter(TrainSchedule.train_id == train_id)
-                .order_by(TrainSchedule.sequence)
+                .order_by(TrainSchedule.stop_order)
                 .all()
             )
 
@@ -114,9 +115,10 @@ class TrainRepository:
                     "station_id": str(schedule.station_id),
                     "station_name": station.name,
                     "zone": station.zone,
-                    "scheduled_arrival": schedule.scheduled_arrival.isoformat(),
-                    "scheduled_departure": schedule.scheduled_departure.isoformat(),
-                    "sequence": schedule.sequence,
+                    "scheduled_arrival": schedule.scheduled_arrival.isoformat() if schedule.scheduled_arrival else None,
+                    "scheduled_departure": schedule.scheduled_departure.isoformat() if schedule.scheduled_departure else None,
+                    "stop_order": schedule.stop_order,
+                    "platform_preference": schedule.platform_preference,
                 })
 
             return result
@@ -371,8 +373,9 @@ class TrainRepository:
                 "id": str(train.id),
                 "train_number": train.train_number,
                 "priority_weight": train.priority_weight,
-                "origin_id": str(train.origin_id),
-                "destination_id": str(train.destination_id),
+                "train_type": train.train_type,
+                "max_speed_kmph": train.max_speed_kmph,
+                "rake_length": train.rake_length,
             }
 
         except SQLAlchemyError as e:
@@ -406,8 +409,9 @@ class TrainRepository:
                     "id": str(train.id),
                     "train_number": train.train_number,
                     "priority_weight": train.priority_weight,
-                    "origin_id": str(train.origin_id),
-                    "destination_id": str(train.destination_id),
+                    "train_type": train.train_type,
+                    "max_speed_kmph": train.max_speed_kmph,
+                    "rake_length": train.rake_length,
                     "status": state.status.value if state else status.value,
                     "accumulated_delay_minutes": state.accumulated_delay_minutes if state else 0.0,
                 })
