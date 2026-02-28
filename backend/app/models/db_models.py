@@ -351,3 +351,68 @@ class OptimizationLog(Base):
         Index("idx_optimization_log_timestamp_desc", "timestamp", postgresql_ops={"timestamp": "DESC"}),
         Index("idx_optimization_log_created", "created_at"),
     )
+
+
+class HistoricalOperationalData(Base):
+    """
+    Historical operational data used for ML model training.
+
+    Populated automatically by SimulationOrchestrator._record_historical_data()
+    after each optimization cycle, and by seed_data.py for initial training corpus.
+    """
+    __tablename__ = "historical_operational_data"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4, nullable=False)
+    train_id = Column(UUID(as_uuid=True), ForeignKey("trains.id", ondelete="CASCADE"), nullable=False, index=True)
+    section_id = Column(UUID(as_uuid=True), ForeignKey("sections.id", ondelete="CASCADE"), nullable=False, index=True)
+    departure_delay = Column(Integer, nullable=False, default=0)
+    arrival_delay = Column(Integer, nullable=False, default=0)
+    section_load = Column(Integer, nullable=False, default=0)
+    time_of_day = Column(Integer, nullable=False, default=0)
+    congestion_flag = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        Index("idx_historical_train", "train_id"),
+        Index("idx_historical_section", "section_id"),
+        Index("idx_historical_created", "created_at"),
+    )
+
+
+class KPIMetric(Base):
+    """
+    KPI metrics snapshot written after each optimization cycle.
+
+    Populated by SimulationOrchestrator._calculate_kpis().
+    """
+    __tablename__ = "kpi_metrics"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4, nullable=False)
+    timestamp = Column(DateTime, nullable=False, index=True, default=datetime.utcnow)
+    total_weighted_delay = Column(Float, nullable=False, default=0.0)
+    average_delay = Column(Float, nullable=False, default=0.0)
+    throughput = Column(Integer, nullable=False, default=0)
+    section_utilization = Column(Float, nullable=False, default=0.0)
+
+    __table_args__ = (
+        Index("idx_kpi_timestamp", "timestamp"),
+    )
+
+
+class ManualOverride(Base):
+    """
+    Log of manual override decisions by dispatchers.
+
+    Populated by SimulationOrchestrator.set_manual_override().
+    """
+    __tablename__ = "manual_overrides"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4, nullable=False)
+    overridden_decision = Column(String(255), nullable=False)
+    reason = Column(Text, nullable=True)
+    overridden_by = Column(String(100), nullable=False, default="dispatcher")
+    timestamp = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (
+        Index("idx_manual_override_timestamp", "timestamp"),
+    )

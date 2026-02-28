@@ -79,12 +79,17 @@ async def lifespan(app: FastAPI):
     logger.info(f"Environment: {settings.environment}")
     logger.info(f"Log level: {settings.log_level}")
 
+    # --- Config validation: fail fast on missing essentials ---
+    database_url = settings.database_url or _parse_database_url(settings.supabase_url)
+    if not database_url:
+        raise RuntimeError(
+            "No database configured. Set DATABASE_URL or SUPABASE_URL in your .env file. "
+            "See .env.example for reference."
+        )
+
     try:
         # 1. Database Engine Setup
         logger.info("Initializing database engine...")
-
-        # Parse database URL — prefer DATABASE_URL from env, fall back to constructing from supabase_url
-        database_url = settings.database_url or _parse_database_url(settings.supabase_url)
 
         logger.debug(f"Database URL: {database_url}")
 

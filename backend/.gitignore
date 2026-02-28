@@ -118,6 +118,16 @@ results/
 outputs/
 logs/
 
+# Debug output files (prevent accumulation)
+*.json
+!package.json
+!package-lock.json
+!tsconfig.json
+!metadata.json
+out*.txt
+error*.txt
+error*.json
+
 # Claude Code & Temporary
 tmpclaude*/
 .claude/

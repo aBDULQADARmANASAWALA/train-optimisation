@@ -8,6 +8,9 @@ from app.models.db_models import (
     TrainSchedule,
     TrainState,
     OptimizationLog,
+    HistoricalOperationalData,
+    KPIMetric,
+    ManualOverride,
     TrainStatus,
     SignallingType,
 )
@@ -20,6 +23,9 @@ __all__ = [
     "TrainSchedule",
     "TrainState",
     "OptimizationLog",
+    "HistoricalOperationalData",
+    "KPIMetric",
+    "ManualOverride",
     "TrainStatus",
     "SignallingType",
 ]

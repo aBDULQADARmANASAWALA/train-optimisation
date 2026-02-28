@@ -1,1 +1,0 @@
-{"optimization_logs": ["id", "timestamp", "objective_value", "total_weighted_delay", "conflicts_detected", "solver_runtime", "notes", "created_at"]}

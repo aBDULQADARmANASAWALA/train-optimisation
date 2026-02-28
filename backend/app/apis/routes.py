@@ -544,7 +544,7 @@ async def get_metrics(
             total_weighted_delay_minutes=total_delay,
             average_section_utilization_percent=0.0,
             conflicts_detected=latest_log.conflicts_detected or 0,
-            conflicts_avoided=latest_log.conflicts_detected or 0,
+            conflicts_avoided=0,
             trains_delayed=trains_delayed,
             trains_on_time=trains_on_time,
             optimization_runtime_seconds=latest_log.solver_runtime or 0.0,
@@ -828,7 +828,9 @@ async def inject_sample_conflicts(
             else:
                 delay = random.choice(delay_options)
             
-            state.accumulated_delay_minutes = (state.accumulated_delay_minutes or 0.0) + delay
+            state.accumulated_delay_minutes = min(
+                120.0, (state.accumulated_delay_minutes or 0.0) + delay
+            )
             state.status = TrainStatus.DELAYED
 
             # CRITICAL: Put ALL chosen trains into the same section to guarantee

@@ -987,7 +987,7 @@ class SimulationOrchestrator:
                 self._db_session.commit()
                 logger.debug(f"Wrote optimization_logs row with plan for {len(plan)} trains")
             except Exception as exc:
-                logger.warning(f"Failed to write optimization_logs: {exc}")
+                logger.error(f"Failed to write optimization_logs: {exc}", exc_info=True)
                 self._db_session.rollback()
 
         # ---- 2. Update train_state for every adjusted train -----------------
@@ -1040,7 +1040,7 @@ class SimulationOrchestrator:
                     f"Train {train_id}: delay {current_delay:.1f}min → {new_delay:.1f}min after optimization"
                 )
             except Exception as exc:
-                logger.warning(f"Failed to update train_state for {train_id}: {exc}")
+                logger.error(f"Failed to update train_state for {train_id}: {exc}", exc_info=True)
 
         logger.info(f"Persisted {len(optimization_result.adjusted_timings)} train state updates to Supabase")
 
@@ -1172,14 +1172,14 @@ class SimulationOrchestrator:
                 rows_written += 1
 
             except Exception as exc:
-                logger.debug(f"Could not record historical data for train {train_id}: {exc}")
+                logger.warning(f"Could not record historical data for train {train_id}: {exc}")
 
         try:
             self._db_session.commit()
             if rows_written:
                 logger.debug(f"Appended {rows_written} rows to historical_operational_data")
         except Exception as exc:
-            logger.warning(f"Failed to commit historical data: {exc}")
+            logger.error(f"Failed to commit historical data: {exc}", exc_info=True)
             self._db_session.rollback()
 
     # =========================================================================
@@ -1275,7 +1275,7 @@ class SimulationOrchestrator:
                 self._db_session.commit()
                 logger.debug("Wrote kpi_metrics row to Supabase")
             except Exception as exc:
-                logger.warning(f"Failed to write kpi_metrics: {exc}")
+                logger.error(f"Failed to write kpi_metrics: {exc}", exc_info=True)
                 self._db_session.rollback()
 
         return kpis
