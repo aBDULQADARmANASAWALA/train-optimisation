@@ -135,6 +135,12 @@ class SimulationOrchestrator:
         self.kpis_history: List[KPISnapshot] = []
         self.cumulative_conflicts_avoided: int = 0
 
+        # Adaptive ML retraining
+        # retrain_interval_cycles: force retrain every N cycles as a safety net
+        # (even if drift hasn't been detected yet)
+        self.retrain_interval_cycles: int = 20
+        self.last_retrain_cycle: int = 0  # cycle number of last retrain
+
         logger.info("SimulationOrchestrator initialized")
 
     # =========================================================================
@@ -187,6 +193,9 @@ class SimulationOrchestrator:
             # Step 6b: Record current traversal data → historical_operational_data
             # This grows the ML training corpus automatically during the demo
             self._record_historical_data(predictions)
+
+            # Step 6c: Adaptive retraining — drift-triggered + periodic safety net
+            self._maybe_retrain()
 
             # Step 7: Calculate KPIs and write kpi_metrics row
             logger.debug("Step 8: Calculating and persisting KPIs")
@@ -737,6 +746,70 @@ class SimulationOrchestrator:
                 logger.warning(f"Failed to update train_state for {train_id}: {exc}")
 
         logger.info(f"Persisted {len(optimization_result.adjusted_timings)} train state updates to Supabase")
+
+    def _maybe_retrain(self) -> None:
+        """
+        Intelligently trigger ML model retraining when needed.
+
+        Two triggers (both non-blocking — any exception is caught and logged
+        so a training failure never kills the orchestration cycle):
+
+        1. Drift-triggered:
+           After every cycle, call predictor.check_for_drift().
+           If the rolling mean prediction error has exceeded 5 minutes MAE,
+           check_for_drift() automatically retrains on the latest
+           historical_operational_data and resets the error tracker.
+
+        2. Periodic safety-net:
+           Force a retrain every `retrain_interval_cycles` cycles (default 20)
+           regardless of drift.  This guarantees the model always eventually
+           learns from the data that _record_historical_data() has been
+           accumulating, even if prediction errors looked acceptable.
+
+        Timeline for a hackathon demo running every 5 minutes:
+          - Cycle  1-19: drift check only (fast)
+          - Cycle  20:   forced retrain (~3 sec on 500 rows)
+          - Cycle  21-39: drift check only
+          - Cycle  40:   forced retrain (now ~600+ rows → better model)
+          ...
+        """
+        try:
+            # --- Trigger 1: drift detection ---
+            drift_result = self.predictor.check_for_drift()
+            if drift_result.get("drift_detected"):
+                action = drift_result.get("action_taken", "unknown")
+                mae    = drift_result.get("mean_error", 0.0)
+                logger.warning(
+                    f"Drift detected (MAE={mae:.2f}min) at cycle {self.cycle_count}: "
+                    f"action={action}"
+                )
+                if action == "retrained":
+                    self.last_retrain_cycle = self.cycle_count
+                    logger.info(
+                        f"Drift-triggered retrain complete at cycle {self.cycle_count} "
+                        f"(samples in DB growing every cycle)"
+                    )
+                return  # Already retrained due to drift, skip periodic check
+
+            # --- Trigger 2: periodic safety-net ---
+            cycles_since_retrain = self.cycle_count - self.last_retrain_cycle
+            if cycles_since_retrain >= self.retrain_interval_cycles:
+                logger.info(
+                    f"Periodic retrain at cycle {self.cycle_count} "
+                    f"({cycles_since_retrain} cycles since last retrain)"
+                )
+                results = self.predictor.train_models()
+                self.last_retrain_cycle = self.cycle_count
+                logger.info(
+                    f"Periodic retrain complete: "
+                    f"delay MAE={results.get('delay_model_score', 'N/A')}, "
+                    f"congestion AUC={results.get('congestion_model_score', 'N/A')}, "
+                    f"samples={results.get('delay_samples', 0)}"
+                )
+
+        except Exception as exc:
+            # Never let a retraining failure crash the cycle
+            logger.warning(f"Retraining skipped due to error: {exc}")
 
     def _record_historical_data(self, predictions: Dict) -> None:
         """
