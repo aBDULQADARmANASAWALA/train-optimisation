@@ -16,6 +16,14 @@ from app.services.predictor import (
     DelayPrediction,
     CongestionPrediction,
 )
+from app.services.simulator import (
+    SimulationOrchestrator,
+    ExecutionStatus,
+    DisruptionType,
+    Disruption,
+    KPISnapshot,
+    CycleResult,
+)
 
 __all__ = [
     "RailwayStateEngine",
@@ -30,4 +38,10 @@ __all__ = [
     "SectionFeatures",
     "DelayPrediction",
     "CongestionPrediction",
+    "SimulationOrchestrator",
+    "ExecutionStatus",
+    "DisruptionType",
+    "Disruption",
+    "KPISnapshot",
+    "CycleResult",
 ]

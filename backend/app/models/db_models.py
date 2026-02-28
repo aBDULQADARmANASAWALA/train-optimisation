@@ -12,8 +12,37 @@ from sqlalchemy import (
     Index,
     Enum as SQLEnum,
     Text,
+    TypeDecorator,
 )
-from sqlalchemy.dialects.postgresql import UUID
+
+# Custom UUID type that stores as STRING but accepts UUID objects
+class GUID(TypeDecorator):
+    """Platform-independent GUID type for SQLite/PostgreSQL compatibility."""
+    impl = String(36)
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        if value is None:
+            return None
+        if hasattr(value, 'hex'):  # It's a UUID object
+            return value.hex[0:8] + '-' + value.hex[8:12] + '-' + value.hex[12:16] + '-' + value.hex[16:20] + '-' + value.hex[20:32]
+        return str(value)
+
+    def process_result_value(self, value, dialect):
+        return value
+
+# UUID type class that works with both PostgreSQL and SQLite
+class _UUIDType:
+    """Flexible UUID type that adapts for different databases."""
+    def __call__(self, as_uuid=False, native_uuid=False):
+        # Return GUID for SQLite compatibility
+        return GUID()
+
+    def __repr__(self):
+        return "UUID()"
+
+UUID = _UUIDType()
+
 from sqlalchemy.orm import declarative_base, relationship
 import enum
 
