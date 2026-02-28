@@ -16,71 +16,95 @@ interface LiveData {
 
 const LiveDataContext = createContext<LiveData | null>(null);
 
-export function LiveDataProvider({ children }: { children: React.ReactNode; }) {
-  const [data, setData] = useState<{
-    trains: Train[];
-    sections: Section[];
-    conflicts: Conflict[];
-    platforms: Platform[];
-    runs: OptimizationRun[];
-    metrics: KPIDashboard | null;
-  }>(() => {
-    const cached = localStorage.getItem('railOrchestraCache');
-    if (cached) {
-      try {
-        return JSON.parse(cached);
-      } catch (e) {
-        console.error('Failed to parse cached data', e);
-      }
-    }
-    return {
-      trains: [],
-      sections: [],
-      conflicts: [],
-      platforms: [],
-      runs: [],
-      metrics: null,
-    };
-  });
+type DataState = {
+  trains: Train[];
+  sections: Section[];
+  conflicts: Conflict[];
+  platforms: Platform[];
+  runs: OptimizationRun[];
+  metrics: KPIDashboard | null;
+};
 
-  const [loading, setLoading] = useState(() => {
-    return !localStorage.getItem('railOrchestraCache');
-  });
+const EMPTY_STATE: DataState = {
+  trains: [],
+  sections: [],
+  conflicts: [],
+  platforms: [],
+  runs: [],
+  metrics: null,
+};
+
+function loadCache(): DataState {
+  try {
+    const cached = localStorage.getItem('railOrchestraCache');
+    if (cached) return JSON.parse(cached);
+  } catch (e) {
+    console.warn('Failed to parse cache', e);
+  }
+  return EMPTY_STATE;
+}
+
+export function LiveDataProvider({ children }: { children: React.ReactNode }) {
+  const [data, setData] = useState<DataState>(loadCache);
+  const [loading, setLoading] = useState(() => !localStorage.getItem('railOrchestraCache'));
   const [error, setError] = useState<string | null>(null);
 
   const refreshData = async () => {
-    try {
-      const liveState = await api.getLiveState();
-      const history = await api.getOptimizationHistory();
-      const metrics = await api.getMetrics();
+    // Fire all three requests in parallel — allSettled means a single failure
+    // never blocks the others (e.g. /history 500 won't prevent live state update)
+    const [liveResult, historyResult, metricsResult] = await Promise.allSettled([
+      api.getLiveState(),
+      api.getOptimizationHistory(),
+      api.getMetrics(),
+    ]);
 
-      const newData = {
-        trains: liveState.trains,
-        sections: liveState.sections,
-        conflicts: liveState.conflicts,
-        platforms: liveState.platforms,
-        runs: history,
-        metrics: metrics,
-      };
+    setData(prev => {
+      const next = { ...prev };
+      let changed = false;
 
-      setData(newData);
-      try {
-        localStorage.setItem('railOrchestraCache', JSON.stringify(newData));
-      } catch (e) {
-        console.warn('Failed to save to localStorage', e);
+      if (liveResult.status === 'fulfilled') {
+        next.trains = liveResult.value.trains;
+        next.sections = liveResult.value.sections;
+        next.conflicts = liveResult.value.conflicts;
+        next.platforms = liveResult.value.platforms;
+        changed = true;
+      } else {
+        console.warn('[refresh] getLiveState failed:', (liveResult.reason as Error)?.message);
       }
+
+      if (historyResult.status === 'fulfilled') {
+        next.runs = historyResult.value;
+        changed = true;
+      } else {
+        console.warn('[refresh] getOptimizationHistory failed:', (historyResult.reason as Error)?.message);
+      }
+
+      if (metricsResult.status === 'fulfilled') {
+        next.metrics = metricsResult.value;
+        changed = true;
+      } else {
+        console.warn('[refresh] getMetrics failed:', (metricsResult.reason as Error)?.message);
+      }
+
+      if (changed) {
+        try { localStorage.setItem('railOrchestraCache', JSON.stringify(next)); } catch { }
+      }
+
+      return next;
+    });
+
+    // Clear error if at least live state succeeded
+    if (liveResult.status === 'fulfilled') {
       setError(null);
-    } catch (err: any) {
-      console.error('Failed to fetch live data:', err);
-      setError(err.message || 'Failed to connect to backend API');
-    } finally {
-      setLoading(false);
+    } else {
+      setError('Could not reach backend API');
     }
+
+    setLoading(false);
   };
 
   useEffect(() => {
     refreshData();
-    // Refresh every 5 seconds for live state
     const interval = setInterval(refreshData, 5000);
     return () => clearInterval(interval);
   }, []);

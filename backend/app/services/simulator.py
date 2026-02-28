@@ -704,6 +704,40 @@ class SimulationOrchestrator:
         # ---- 1. Write optimization_logs row --------------------------------
         if self._db_session is not None:
             try:
+                import json
+
+                # Build a human-readable plan for the frontend
+                plan = []
+                adjusted_timings = getattr(optimization_result, "adjusted_timings", {}) or {}
+                for train_id, timings in adjusted_timings.items():
+                    if not timings:
+                        continue
+                    train_info = self.state_engine.trains.get(train_id, {})
+                    max_delay = max((float(t.get("delay_minutes", 0)) for t in timings), default=0.0)
+                    action = "on_time" if max_delay <= 0 else ("minor_delay" if max_delay <= 5 else "hold")
+                    plan.append({
+                        "train_id": str(train_id),
+                        "train_number": train_info.get("train_number", "UNKNOWN"),
+                        "action": action,
+                        "max_delay_minutes": round(max_delay, 1),
+                        "stops": [
+                            {
+                                "station_name": t.get("station_name", ""),
+                                "stop_order": t.get("stop_order", 0),
+                                "scheduled_arrival": t.get("scheduled_arrival"),
+                                "adjusted_arrival": t.get("adjusted_arrival"),
+                                "delay_minutes": round(float(t.get("delay_minutes", 0)), 1),
+                            }
+                            for t in sorted(timings, key=lambda x: x.get("stop_order", 0))
+                        ],
+                    })
+
+                notes_json = json.dumps({
+                    "cycle": self.cycle_count,
+                    "status": str(getattr(optimization_result, "status", "unknown")),
+                    "plan": plan,
+                })
+
                 self._db_session.execute(
                     text("""
                         INSERT INTO optimization_logs
@@ -720,17 +754,27 @@ class SimulationOrchestrator:
                         "delay": float(getattr(optimization_result, "total_weighted_delay", 0)),
                         "conflicts": int(getattr(optimization_result, "conflicts_resolved", 0)),
                         "runtime": float(getattr(optimization_result, "solver_runtime_seconds", 0)),
-                        "notes": f"cycle={self.cycle_count} status={getattr(optimization_result, 'status', 'unknown')}",
+                        "notes": notes_json,
                         "created_at": now.isoformat(),
                     },
                 )
                 self._db_session.commit()
-                logger.debug("Wrote optimization_logs row")
+                logger.debug(f"Wrote optimization_logs row with plan for {len(plan)} trains")
             except Exception as exc:
                 logger.warning(f"Failed to write optimization_logs: {exc}")
                 self._db_session.rollback()
 
         # ---- 2. Update train_state for every adjusted train -----------------
+        # When optimization SUCCEEDS, it means the solver found the best schedule —
+        # trains that were adjusted should have their delay REDUCED, not increased.
+        # The optimizer's delay_minutes is relative to the 24h-forward schedule window,
+        # so we must NOT write it raw back to accumulated_delay_minutes (causes runaway growth).
+        #
+        # Policy:
+        #  - If optimizer found delay=0 for a stop → train is fully on-schedule → clear delay
+        #  - If optimizer had to absorb some delay → take the MINIMUM of current vs new
+        #    (optimization never makes a train MORE delayed than it already is;
+        #     if it does it means the horizon gap, not real delay)
         if not hasattr(optimization_result, "adjusted_timings"):
             return
 
@@ -738,29 +782,42 @@ class SimulationOrchestrator:
             if not timings:
                 continue
             try:
-                # Use the maximum delay across all adjusted stops (worst-case delay for this train)
-                max_delay = max(float(t.get("delay_minutes", 0)) for t in timings)
-                max_delay = max(0.0, max_delay)
+                current_delay = float(
+                    self.state_engine.trains.get(train_id, {}).get("accumulated_delay_minutes", 0.0)
+                )
 
-                # Determine a realistic status from delay magnitude
-                if max_delay <= 0:
+                # The optimizer's delay_minutes can reflect large horizon offsets.
+                # We only trust it to REDUCE delay, never to increase it.
+                # Use the minimum stop-level delay as the new baseline.
+                min_opt_delay = min(float(t.get("delay_minutes", 0)) for t in timings)
+                min_opt_delay = max(0.0, min_opt_delay)  # clamp negatives to 0
+
+                # Optimization should reduce delay: take min of current vs optimizer result
+                new_delay = min(current_delay, min_opt_delay)
+
+                # Determine status
+                if new_delay <= 0:
                     new_status = "in_transit"
-                elif max_delay <= 5:
-                    new_status = "in_transit"   # minor delay, still running
+                elif new_delay <= 5:
+                    new_status = "in_transit"
                 else:
                     new_status = "delayed"
 
                 self.train_repo.update_train_state(
                     train_id,
                     {
-                        "accumulated_delay_minutes": max_delay,
+                        "accumulated_delay_minutes": new_delay,
                         "status": new_status,
                     },
+                )
+                logger.debug(
+                    f"Train {train_id}: delay {current_delay:.1f}min → {new_delay:.1f}min after optimization"
                 )
             except Exception as exc:
                 logger.warning(f"Failed to update train_state for {train_id}: {exc}")
 
         logger.info(f"Persisted {len(optimization_result.adjusted_timings)} train state updates to Supabase")
+
 
     def _maybe_retrain(self) -> None:
         """
@@ -912,18 +969,14 @@ class SimulationOrchestrator:
         """
         Calculate KPIs and write a kpi_metrics row to Supabase.
         """
-        # Compute total delay from actual train states (always reflects reality)
+        # Use actual accumulated delays from train_states (correctly updated by optimizer above)
+        # The optimizer's total_weighted_delay is a large horizon-relative number and should
+        # NOT be used as the displayed KPI — it would mislead the dashboard.
         actual_total_delay = sum(
             info.get("accumulated_delay_minutes", 0.0)
             for info in self.state_engine.trains.values()
         )
-
-        # If optimizer produced a result, use its weighted delay; otherwise fall back
-        # to the raw sum of accumulated delays so the dashboard always shows something meaningful
-        if optimization_result and hasattr(optimization_result, "total_weighted_delay") and optimization_result.total_weighted_delay > 0:
-            total_delay = optimization_result.total_weighted_delay
-        else:
-            total_delay = actual_total_delay
+        total_delay = actual_total_delay
 
 
         # Average section utilization from live occupancy

@@ -12,7 +12,7 @@ import { LoadingOverlay } from './components/LoadingOverlay';
 function AppLayout() {
   const [activeTab, setActiveTab] = useState('dashboard');
   const [systemStatus, setSystemStatus] = useState<'running' | 'frozen'>('running');
-  const { loading } = useLiveData();
+  const { loading, refreshData } = useLiveData();
 
   const renderContent = () => {
     switch (activeTab) {
@@ -40,9 +40,10 @@ function AppLayout() {
           setActiveTab={setActiveTab}
           systemStatus={systemStatus}
           setSystemStatus={setSystemStatus}
+          onConflictsInjected={refreshData}
         />
         <div className="flex-1 flex flex-col min-w-0">
-          <Header systemStatus={systemStatus} lastRunTimestamp={new Date().toISOString()} />
+          <Header systemStatus={systemStatus} />
           <main className="flex-1 overflow-y-auto">
             {renderContent()}
           </main>
@@ -51,6 +52,7 @@ function AppLayout() {
     </>
   );
 }
+
 
 export default function App() {
   return (

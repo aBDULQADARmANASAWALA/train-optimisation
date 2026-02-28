@@ -5,6 +5,7 @@ import { cn } from '../utils/cn';
 import { useState } from 'react';
 import { api } from '../api';
 import { LoadingOverlay } from './LoadingOverlay';
+import { OptimizationPlanPanel } from './OptimizationPlanPanel';
 
 const trendData = [
   { time: '10:00', delay: 120 },
@@ -19,12 +20,14 @@ const trendData = [
 export function Dashboard() {
   const { trains, sections, conflicts, runs, metrics, loading, error, refreshData } = useLiveData();
   const [isOptimizing, setIsOptimizing] = useState(false);
+  const [planRefreshTrigger, setPlanRefreshTrigger] = useState(0);
 
   const handleOptimization = async () => {
     try {
       setIsOptimizing(true);
       await api.runOptimization();
       await refreshData();
+      setPlanRefreshTrigger(t => t + 1); // reload the plan panel
     } catch (err) {
       console.error("Failed to run optimization:", err);
       alert("Failed to run optimization. Check console for details.");
@@ -255,13 +258,13 @@ export function Dashboard() {
             </div>
           </div>
 
-          {/* Recent Optimizations */}
-          <div className="bg-white p-6 rounded-2xl border border-zinc-200 shadow-sm flex flex-col">
-            <div className="flex items-center justify-between mb-6">
-              <h3 className="text-base font-semibold text-zinc-900">Optimization Runs</h3>
+          {/* Optimization Plan Panel — replaces static history list */}
+          <div className="bg-white rounded-2xl border border-zinc-200 shadow-sm flex flex-col">
+            <div className="flex items-center justify-between p-6 border-b border-zinc-100 pb-4 mb-0">
+              <h3 className="text-base font-semibold text-zinc-900">Recent Runs</h3>
               <Activity className="w-4 h-4 text-zinc-400" />
             </div>
-            <div className="flex-1 space-y-4 overflow-y-auto pr-2">
+            <div className="flex-1 space-y-4 overflow-y-auto p-6 pt-4 pr-2">
               {runs.map((run) => (
                 <div key={run.id} className="flex items-start gap-4 p-4 rounded-xl border border-zinc-100 bg-zinc-50/50">
                   <div className={cn(
@@ -286,6 +289,9 @@ export function Dashboard() {
             </div>
           </div>
         </div>
+
+        {/* Optimization Plan — full width below the grid */}
+        <OptimizationPlanPanel refreshTrigger={planRefreshTrigger} />
       </div>
     </>
   );

@@ -484,3 +484,5 @@ logger.info(
     f"FastAPI app created: {app.title} v{app.version} | "
     f"Environment: {settings.environment}"
 )
+
+ 

@@ -22,7 +22,7 @@ from pydantic import BaseModel, Field
 
 from app.config import get_settings
 from app.repositories import TrainRepository, SectionRepository
-from app.models import OptimizationLog, TrainState
+from app.models import OptimizationLog, TrainState, Train, TrainStatus
 from app.services import (
     RailwayStateEngine,
     OptimizationService,
@@ -525,38 +525,31 @@ async def get_metrics(
             logger.warning("No optimization logs found in DB yet")
             return None
 
-        # Compute live train delay stats from train_states
+        # Always use real accumulated delays from train_states for the dashboard metric.
+        # The optimizer's total_weighted_delay in logs is horizon-relative and inflated.
         states = db.query(TrainState).all()
-        total_delay = sum(
-            (s.accumulated_delay_minutes or 0.0) for s in states
-        )
-        trains_delayed = sum(
-            1 for s in states if (s.accumulated_delay_minutes or 0.0) > 0.5
-        )
+        total_delay = round(sum((s.accumulated_delay_minutes or 0.0) for s in states), 1)
+        trains_delayed = sum(1 for s in states if (s.accumulated_delay_minutes or 0.0) > 0.5)
         trains_on_time = len(states) - trains_delayed
-
-        # Use the optimizer's weighted delay if it's meaningful, else fall back to sum
-        weighted_delay = latest_log.total_weighted_delay or total_delay
 
         response = KPIDashboard(
             timestamp=latest_log.timestamp,
-            cycle_number=1,  # Track via log count
-            total_weighted_delay_minutes=weighted_delay,
-            average_section_utilization_percent=0.0,  # Computed live; not persisted
+            cycle_number=1,
+            total_weighted_delay_minutes=total_delay,
+            average_section_utilization_percent=0.0,
             conflicts_detected=latest_log.conflicts_detected or 0,
             conflicts_avoided=latest_log.conflicts_detected or 0,
             trains_delayed=trains_delayed,
             trains_on_time=trains_on_time,
             optimization_runtime_seconds=latest_log.solver_runtime or 0.0,
             schedule_adherence_percent=max(
-                0.0, 100.0 - min(100.0, weighted_delay / max(len(states), 1))
+                0.0, 100.0 - min(100.0, total_delay / max(len(states), 1))
             ),
             prediction_accuracy_mae=0.0,
         )
 
         logger.debug(
-            f"Metrics fetched from DB: delay={response.total_weighted_delay_minutes:.1f}min, "
-            f"trains_delayed={trains_delayed}"
+            f"Metrics from DB: real_delay={total_delay}min, trains_delayed={trains_delayed}"
         )
         return response
 
@@ -653,8 +646,66 @@ async def get_optimization_history(
 
 
 # ============================================================================
-# Status & Diagnostics
+# Optimization Plan (latest actionable recommendations)
 # ============================================================================
+
+@router.get("/optimization/latest-plan", response_model=Dict[str, Any])
+async def get_latest_optimization_plan(
+    db: Session = Depends(get_db_session),
+) -> Dict[str, Any]:
+    """
+    Get the actionable recommendations from the most recent optimization run.
+
+    Returns per-train decisions: which trains to hold, which to send,
+    how much delay to absorb at each stop, and the optimized schedule.
+    """
+    import json as _json
+    logger.debug("GET /optimization/latest-plan")
+
+    try:
+        latest_log = (
+            db.query(OptimizationLog)
+            .order_by(desc(OptimizationLog.timestamp))
+            .first()
+        )
+
+        if latest_log is None:
+            return {
+                "available": False,
+                "message": "No optimization has been run yet. Click 'Force Optimization' to generate a plan.",
+                "plan": [],
+                "timestamp": None,
+                "total_weighted_delay": 0.0,
+            }
+
+        # Parse the JSON plan stored in notes
+        plan = []
+        meta = {}
+        if latest_log.notes:
+            try:
+                meta = _json.loads(latest_log.notes)
+                plan = meta.get("plan", [])
+            except Exception:
+                # notes may be plain text from older runs
+                plan = []
+
+        return {
+            "available": True,
+            "timestamp": latest_log.timestamp.isoformat(),
+            "total_weighted_delay": latest_log.total_weighted_delay,
+            "solver_runtime_seconds": latest_log.solver_runtime,
+            "plan": plan,  # list of {train_id, train_number, action, max_delay_minutes, stops}
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to fetch optimization plan: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to fetch plan: {str(e)}",
+        )
+
+
+
 
 @router.get("/status", response_model=Dict[str, Any])
 async def get_status(
@@ -771,3 +822,115 @@ async def get_model_status(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to get model status: {str(e)}",
         )
+
+
+# ============================================================================
+# Sample Conflict Injection
+# ============================================================================
+
+class ConflictInjectionResponse(BaseModel):
+    """Response from sample conflict injection"""
+    trains_affected: int
+    injected_conflicts: List[Dict[str, Any]]
+    message: str
+
+
+@router.post("/conflicts/inject", response_model=ConflictInjectionResponse)
+async def inject_sample_conflicts(
+    db: Session = Depends(get_db_session),
+) -> ConflictInjectionResponse:
+    """
+    Inject sample conflicts into the database for demonstration / testing.
+
+    Picks 2-4 random active trains and bumps their accumulated_delay_minutes
+    so the optimizer has fresh conflicts to resolve.  Also puts some of them
+    into the same section to trigger capacity / headway conflicts.
+
+    Returns:
+        ConflictInjectionResponse listing which trains were affected and by
+        how much delay was injected.
+    """
+    import random
+    logger.info("POST /conflicts/inject - Injecting sample conflicts")
+
+    try:
+        # Pull every train that has a state row (so we can update it)
+        pairs = (
+            db.query(TrainState, Train)
+            .join(Train, TrainState.train_id == Train.id)
+            .filter(
+                TrainState.status.notin_([TrainStatus.COMPLETED, TrainStatus.CANCELLED])
+            )
+            .all()
+        )
+
+        if not pairs:
+            return ConflictInjectionResponse(
+                trains_affected=0,
+                injected_conflicts=[],
+                message="No active trains found in the database. Run the mock data generator first.",
+            )
+
+        # Shuffle and pick a subset (between 2 and min(4, total))
+        random.shuffle(pairs)
+        count = min(max(2, len(pairs) // 3), 4)
+        chosen = pairs[:count]
+
+        # Optionally pick one existing section to crowd (triggers capacity conflict)
+        # Pull a section that already has a train so headway maths is realistic
+        crowded_section_id: Optional[str] = None
+        if len(chosen) >= 2:
+            existing_sections = [
+                p[0].current_section_id for p in chosen if p[0].current_section_id
+            ]
+            if existing_sections:
+                crowded_section_id = str(existing_sections[0])
+
+        injected = []
+        delay_options = [12, 15, 18, 22, 28, 35, 45]
+
+        for idx, (state, train) in enumerate(chosen):
+            delay = random.choice(delay_options)
+            state.accumulated_delay_minutes = (state.accumulated_delay_minutes or 0.0) + delay
+            state.status = TrainStatus.DELAYED
+
+            # Put the first two trains into the same section to create a
+            # capacity / headway conflict that the optimiser can detect
+            if crowded_section_id and idx < 2:
+                from uuid import UUID as _UUID
+                try:
+                    state.current_section_id = _UUID(crowded_section_id)
+                except Exception:
+                    pass  # section_id may already be correct type
+
+            injected.append({
+                "train_id": str(state.train_id),
+                "train_number": train.train_number,
+                "delay_added_minutes": delay,
+                "total_delay_minutes": state.accumulated_delay_minutes,
+                "status": TrainStatus.DELAYED.value,
+                "section_id": str(state.current_section_id) if state.current_section_id else None,
+            })
+
+        db.commit()
+
+        msg = (
+            f"Injected conflicts: {count} trains now delayed by 12–45 min. "
+            f"{'Two trains placed in same section to trigger a capacity conflict. ' if crowded_section_id else ''}"
+            "Click 'Force Optimization' to resolve."
+        )
+        logger.info(msg)
+        return ConflictInjectionResponse(
+            trains_affected=count,
+            injected_conflicts=injected,
+            message=msg,
+        )
+
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Conflict injection failed: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Conflict injection failed: {str(e)}",
+        )
+ 

@@ -71,3 +71,28 @@ export interface KPIDashboard {
   schedule_adherence_percent: number;
   prediction_accuracy_mae: number;
 }
+
+export interface OptimizationPlanStop {
+  station_name: string;
+  stop_order: number;
+  scheduled_arrival: string | null;
+  adjusted_arrival: string | null;
+  delay_minutes: number;
+}
+
+export interface OptimizationPlanEntry {
+  train_id: string;
+  train_number: string;
+  action: 'on_time' | 'minor_delay' | 'hold';
+  max_delay_minutes: number;
+  stops: OptimizationPlanStop[];
+}
+
+export interface OptimizationPlan {
+  available: boolean;
+  message?: string;
+  timestamp: string | null;
+  total_weighted_delay: number;
+  solver_runtime_seconds?: number;
+  plan: OptimizationPlanEntry[];
+}

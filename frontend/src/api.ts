@@ -1,4 +1,4 @@
-import { NetworkState, OptimizationRun, KPIDashboard, Train, Section } from './types';
+import { NetworkState, OptimizationRun, KPIDashboard, Train, Section, OptimizationPlan } from './types';
 
 const API_BASE_URL = 'http://localhost:8010/api/v1';
 
@@ -89,5 +89,29 @@ export const api = {
             body: JSON.stringify({ include_predictions: true })
         });
         return res.json();
-    }
+    },
+
+    getOptimizationPlan: async (): Promise<OptimizationPlan> => {
+        const res = await fetchWithRetry(`${API_BASE_URL}/optimization/latest-plan`);
+        return res.json();
+    },
+
+    injectSampleConflicts: async (): Promise<{
+        trains_affected: number;
+        injected_conflicts: Array<{
+            train_id: string;
+            train_number: string;
+            delay_added_minutes: number;
+            total_delay_minutes: number;
+            status: string;
+            section_id: string | null;
+        }>;
+        message: string;
+    }> => {
+        const res = await fetchWithRetry(`${API_BASE_URL}/conflicts/inject`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+        });
+        return res.json();
+    },
 };
