@@ -169,6 +169,34 @@ python -m examples.testing_predictor
 
 ---
 
+### 7. **testing_simulator.py** 🧠 - Orchestration Brain
+- **Purpose**: Demonstrates the full orchestration loop tying all services together
+- **Examples Included**:
+  - Running complete orchestration cycles
+  - Monitoring executed optimizations
+  - Injecting disruptions for scenario testing
+  - Manual override for emergency control
+  - KPI tracking and trend analysis
+  - Execution summaries and success metrics
+
+**Run it:**
+```bash
+cd backend
+python -m examples.testing_simulator
+```
+
+**Key Capabilities**:
+- ✓ Full service orchestration (State → Predictor → Optimizer → Persist)
+- ✓ Rolling horizon execution (5-minute cycles)
+- ✓ Disruption injection (delay, capacity, closure, platform failure)
+- ✓ Manual override mode for emergency
+- ✓ KPI monitoring (delay, utilization, conflicts)
+- ✓ Transactional validation (all-or-nothing persistence)
+- ✓ Execution history and metrics
+- ✓ Designed for background job scheduling
+
+---
+
 ## How to Use These Examples
 
 ### For Learning
@@ -177,7 +205,8 @@ python -m examples.testing_predictor
 3. Check `testing_repositories.py` to learn about data access
 4. Study `testing_state_engine.py` to understand the core engine
 5. Learn `testing_optimizer.py` for optimization strategies
-6. Advanced: Explore `testing_predictor.py` for ML predictions
+6. Explore `testing_predictor.py` for ML predictions
+7. Advanced: Study `testing_simulator.py` to see full orchestration
 
 ### For Testing During Development
 1. Run examples to verify changes don't break basic functionality
@@ -240,9 +269,10 @@ After running these examples:
 4. ✅ State engine detects conflicts
 5. ✅ Optimizer minimizes delays with CP-SAT
 6. ✅ Predictor forecasts delays and congestion
-7. Next: Build API endpoints (routes)
-8. Next: Create simulator service
-9. Next: Deploy and test
+7. ✅ Simulator orchestrates full execution cycle
+8. Next: Build API endpoints (routes)
+9. Next: Integrate with Supabase database
+10. Next: Deploy and test
 
 ---
 
