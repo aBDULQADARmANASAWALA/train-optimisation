@@ -132,11 +132,8 @@ class OptimizationService:
             # Define optimization window
             horizon_end = snapshot.timestamp + timedelta(minutes=horizon_minutes)
 
-            # Filter relevant data within horizon
-            relevant_stops = [
-                stop for stop in snapshot.train_stops
-                if snapshot.timestamp <= stop.scheduled_arrival <= horizon_end
-            ]
+            # Use all stops that the orchestrator passed (these are already filtered to a reasonable window)
+            relevant_stops = snapshot.train_stops
 
             if not relevant_stops:
                 logger.warning("No train stops within horizon window")
@@ -282,37 +279,41 @@ class OptimizationService:
         for stop in relevant_stops:
             stop_id = (stop.train_id, stop.station_id, stop.stop_order)
 
-            # ── ML predicted delay offset ──────────────────────────────────
-            # If the ML model predicted this train will be N minutes late,
-            # shift the lower bound up by N so the solver's search space
-            # starts from the realistic position.
-            ml_delay = int(snapshot.predicted_delays.get(stop.train_id, 0.0))
-            ml_delay = max(0, ml_delay)  # clamp negative predictions to 0
+            # ── Delay constraints ──────────────────────────────────────────
+            # Ensure the solver cannot send trains back in time. It must start
+            # from at least the currently known accumulated delay + ML prediction.
+            current_delay = snapshot.trains.get(stop.train_id, {}).get("accumulated_delay_minutes", 0.0)
+            ml_delay = snapshot.predicted_delays.get(stop.train_id, 0.0)
+            effective_delay = int(max(0.0, current_delay, ml_delay))
 
-            # Calculate bounds for arrival time
-            scheduled_arr = stop.scheduled_arrival
-            arr_min = int((scheduled_arr - horizon_start).total_seconds() / 60) + ml_delay
-            arr_max = arr_min + 120  # Allow up to 2 additional hours beyond predicted
+            # Lower bound = scheduled time relative to horizon
+            scheduled_arr_offset = int((stop.scheduled_arrival - horizon_start).total_seconds() / 60)
+            arr_min = scheduled_arr_offset
+            # Expand max bound to accommodate effective delay
+            arr_max = max(arr_min + 120 + effective_delay, horizon_length)
 
             arrival_times[stop_id] = model.NewIntVar(
-                max(0, arr_min),
-                min(horizon_length, max(arr_max, arr_min + 1)),
+                arr_min,
+                arr_max,
                 f"arr_{stop.train_id}_{stop.station_id}_{stop.stop_order}",
             )
+            # Add constraint: arrival_time >= scheduled_arrival + accumulated_delay
+            model.Add(arrival_times[stop_id] >= scheduled_arr_offset + effective_delay)
 
-            # Departure bounds (also offset by ML delay)
-            scheduled_dep = stop.scheduled_departure
-            dep_min = int((scheduled_dep - horizon_start).total_seconds() / 60) + ml_delay
-            dep_max = dep_min + 120
+            # Departure bounds
+            scheduled_dep_offset = int((stop.scheduled_departure - horizon_start).total_seconds() / 60)
+            dep_min = scheduled_dep_offset
+            dep_max = max(dep_min + 120 + effective_delay, horizon_length)
 
             departure_times[stop_id] = model.NewIntVar(
-                max(0, dep_min),
-                min(horizon_length, max(dep_max, dep_min + 1)),
+                dep_min,
+                dep_max,
                 f"dep_{stop.train_id}_{stop.station_id}_{stop.stop_order}",
             )
+            model.Add(departure_times[stop_id] >= scheduled_dep_offset + effective_delay)
 
         # Create precedence variables for trains on same sections (for headway/capacity)
-        section_trains = self._group_trains_by_section(relevant_stops)
+        section_trains = self._group_trains_by_section(relevant_stops, snapshot.sections)
         for section_id, train_list in section_trains.items():
             if len(train_list) > 1:
                 for i in range(len(train_list)):
@@ -332,6 +333,9 @@ class OptimizationService:
             "departure_times": departure_times,
             "precedence_vars": precedence_vars,
             "horizon_start": horizon_start,
+            "headway_violations": [],
+            "platform_violations": [],
+            "schedule_deviations": [],
         }
 
     def _add_constraints(
@@ -408,15 +412,38 @@ class OptimizationService:
         for station_id, stop_list in station_trains.items():
             platform_capacity = snapshot.platform_capacity.get(station_id, 4)  # Default 4
 
-            # Create "at_platform" boolean vars for each train-time window
-            if len(stop_list) > platform_capacity:
-                infeasibility_reasons.append(
-                    f"Station {station_id}: {len(stop_list)} trains exceed platform capacity {platform_capacity}"
+            # 1️⃣ Enforce Platform Capacity Using Interval Variables
+            intervals = []
+            for stop in stop_list:
+                stop_id = (stop.train_id, stop.station_id, stop.stop_order)
+                if stop_id in arrival_times and stop_id in departure_times:
+                    duration = int(max(1, stop.platform_dwell_time_minutes))
+                    interval_var = model.NewIntervalVar(
+                        arrival_times[stop_id],
+                        duration,
+                        departure_times[stop_id],
+                        f"plat_int_{stop.train_id}_{station_id}_{stop.stop_order}"
+                    )
+                    intervals.append(interval_var)
+
+            if intervals:
+                # Add a soft platform violation variable
+                violation_var = model.NewIntVar(0, 100, f"plat_viol_{station_id}")
+                variables["platform_violations"].append(violation_var)
+                
+                # Capacity must be represented as an IntVar for cumulative with slack
+                cap_var = model.NewIntVar(0, 100, f"plat_cap_{station_id}")
+                model.Add(cap_var == platform_capacity + violation_var)
+                
+                model.AddCumulative(
+                    intervals,
+                    demands=[1] * len(intervals),
+                    capacity=cap_var
                 )
 
         # Constraint 5: Section headway and capacity
         logger.debug("Adding section capacity and headway constraints")
-        section_trains = self._group_trains_by_section(relevant_stops)
+        section_trains = self._group_trains_by_section(relevant_stops, snapshot.sections)
 
         for section_id, train_list in section_trains.items():
             section = self._find_section_by_id(snapshot.sections, section_id)
@@ -450,26 +477,33 @@ class OptimizationService:
                             stop_i_next_id = (train_i, stop_i_next.station_id, stop_i_next.stop_order)
                             stop_j_next_id = (train_j, stop_j_next.station_id, stop_j_next.stop_order)
 
-                            if all(
-                                sid in departure_times
-                                for sid in [stop_i_next_id, stop_j_next_id]
-                            ):
-                                # Disjunctive constraint: either train_i before train_j or vice versa
+                            # 2️⃣ Implement Proper Disjunctive Headway Constraints
+                            if all(sid in departure_times for sid in [stop_i_id, stop_j_id]) and \
+                               all(sid in arrival_times for sid in [stop_i_next_id, stop_j_next_id]):
+
+                                dep_i = departure_times[stop_i_id]
+                                arr_i = arrival_times[stop_i_next_id]
+                                dep_j = departure_times[stop_j_id]
+                                arr_j = arrival_times[stop_j_next_id]
+
+                                req_headway = headway + safety_margin
                                 prec_var = precedence_vars.get((train_i, train_j, section_id))
-                                if prec_var:
-                                    M = 100000  # Large number
+                                
+                                if prec_var is not None:
+                                    # 3️⃣ Add Headway Violation Slack Variables (Soft Enforcement)
+                                    BIG_M = 14400  # Reasonable Big M
+                                    violation = model.NewIntVar(0, BIG_M, f"hw_viol_{train_i}_{train_j}_{section_id}")
+                                    
+                                    actual_headway = model.NewIntVar(-BIG_M, BIG_M, f"act_hw_{train_i}_{train_j}_{section_id}")
+                                    model.Add(actual_headway == arr_j - dep_i).OnlyEnforceIf(prec_var)
+                                    model.Add(actual_headway == arr_i - dep_j).OnlyEnforceIf(prec_var.Not())
+                                    
+                                    model.Add(violation >= req_headway - actual_headway)
+                                    variables["headway_violations"].append(violation)
 
-                                    # If prec=1: train_i departs before train_j arrives + headway
-                                    model.Add(
-                                        departure_times[stop_i_next_id] + headway + safety_margin
-                                        <= arrival_times[stop_j_next_id] + M * (1 - prec_var)
-                                    )
-
-                                    # If prec=0: train_j departs before train_i arrives + headway
-                                    model.Add(
-                                        departure_times[stop_j_next_id] + headway + safety_margin
-                                        <= arrival_times[stop_i_next_id] + M * prec_var
-                                    )
+                                    # Add full disjunction
+                                    model.Add(dep_i + req_headway <= arr_j + violation).OnlyEnforceIf(prec_var)
+                                    model.Add(dep_j + req_headway <= arr_i + violation).OnlyEnforceIf(prec_var.Not())
 
         logger.info(f"Added constraints: {model.Proto().constraints.__sizeof__()} constraint bytes")
 
@@ -571,15 +605,33 @@ class OptimizationService:
 
             delay_terms.append((delay_var, weight))
 
-        # ── Minimize total weighted delay (includes congestion penalties) ──
+            # Record schedule deviation
+            dev_var = model.NewIntVar(0, 10000, f"dev_{stop.train_id}_{stop.station_id}")
+            model.AddAbsEquality(dev_var, actual_arr - scheduled_arr_offset)
+            variables["schedule_deviations"].append(dev_var)
+
+        # 5️⃣ Improve Objective Function
+        # Minimize:
+        # 1.0 * total_weighted_delay + 1000 * sum(headway_violations) + 500 * sum(platform_violations) + 0.1 * total_schedule_deviation
+        # CP-SAT uses integers, so we multiply by 10 to keep 0.1 relative
+        objective_expr = 0
         if delay_terms:
-            model.Minimize(sum(dv * w for dv, w in delay_terms))
-            logger.debug(
-                f"Objective: minimize {len(delay_terms)} weighted delay terms "
-                f"(incl. congestion penalties on {len(section_congestion_penalty)} sections)"
-            )
+            objective_expr += 10 * sum(dv * w for dv, w in delay_terms)
+            
+        if variables["headway_violations"]:
+            objective_expr += 10000 * sum(variables["headway_violations"])
+            
+        if variables["platform_violations"]:
+            objective_expr += 5000 * sum(variables["platform_violations"])
+            
+        if variables["schedule_deviations"]:
+            objective_expr += sum(variables["schedule_deviations"])
+            
+        if type(objective_expr) is not int or objective_expr != 0:
+            model.Minimize(objective_expr)
+            logger.debug("Objective function set with balanced weights")
         else:
-            logger.warning("No delay terms in objective")
+            logger.warning("No objective terms found")
 
     def _apply_warm_start(
         self,
@@ -684,13 +736,14 @@ class OptimizationService:
         # Count conflicts resolved: precedence decisions made (prec_var = 1 means train_i forced before train_j)
         precedence_vars = variables.get("precedence_vars", {})
         conflicts_resolved = 0
-        try:
-            for (train_i, train_j, section_id), prec_var in precedence_vars.items():
-                val = solver.Value(prec_var)
-                if val == 1:
-                    conflicts_resolved += 1
-        except Exception:
-            pass  # Solver may not have values for unused vars
+        
+        precedence_vars_created = len(precedence_vars)
+        platform_intervals_created = len(variables.get("platform_violations", []))
+        headway_constraints_added = len(variables.get("headway_violations", []))
+        
+        logger.info(f"[Model Debug] Precedence variables created: {precedence_vars_created}")
+        logger.info(f"[Model Debug] Platform intervals created: {platform_intervals_created}")
+        logger.info(f"[Model Debug] Headway constraints added: {headway_constraints_added}")
 
         # Generate structured explanation
         explanation = self._generate_explanation(
@@ -701,6 +754,9 @@ class OptimizationService:
             adjusted_timings,
             total_weighted_delay,
         )
+        if explanation is not None:
+            explanation["precedence_variables_created"] = precedence_vars_created
+
 
         logger.info(
             f"Solution extracted: {len(trains_adjusted)} trains adjusted, "
@@ -773,19 +829,17 @@ class OptimizationService:
     def _group_trains_by_section(
         self,
         stops: List[TrainStop],
+        sections: List[SectionInfo],
     ) -> Dict[UUID, List[Tuple[UUID, "TrainStop"]]]:
         """
         Group trains by the sections they traverse.
 
         For each consecutive pair of stops (stop_i → stop_i+1) belonging to
         the same train, the pair is mapped to the section whose
-        (from_station_id, to_station_id) matches that leg.  Because sections
-        are looked up by station pair rather than a pre-built section map
-        here (we don't have snapshot in scope), we use station-pair tuples as
-        the section key so the caller can still build precedence variables.
+        (from_station_id, to_station_id) matches that leg.
 
         Returns:
-            Dict mapping section_id (or station-pair UUID proxy) to list of
+            Dict mapping section_id to list of
             (train_id, departure_stop) tuples for trains traversing it.
         """
         # Build per-train ordered stop list
@@ -796,7 +850,6 @@ class OptimizationService:
             lst.sort(key=lambda s: s.stop_order)
 
         # Map (from_station_id, to_station_id) → [(train_id, stop_at_from)]
-        # We use a composite UUID-like key derived from the two station IDs
         section_map: Dict[UUID, List[Tuple[UUID, TrainStop]]] = {}
 
         for train_id, train_stops_list in train_stop_map.items():
@@ -804,19 +857,19 @@ class OptimizationService:
                 dep_stop  = train_stops_list[i]      # departing from dep_stop.station_id
                 arr_stop  = train_stops_list[i + 1]  # arriving at arr_stop.station_id
 
-                # Create a deterministic proxy key from station pair
                 from_id = dep_stop.station_id
                 to_id   = arr_stop.station_id
-                # XOR bytes to get a stable UUID for this directed station pair
-                import uuid as _uuid
-                key = _uuid.UUID(
-                    bytes=bytes(
-                        a ^ b
-                        for a, b in zip(from_id.bytes, to_id.bytes)
-                    )
-                )
-
-                section_map.setdefault(key, []).append((train_id, dep_stop))
+                
+                # Find the actual section_id
+                section = self._find_section(sections, from_id, to_id)
+                if not section:
+                    # Try reverse direction if bidirectional
+                    section = self._find_section(sections, to_id, from_id)
+                
+                if section:
+                    section_map.setdefault(section.section_id, []).append((train_id, dep_stop))
+                else:
+                    logger.debug(f"Could not find section for {from_id} -> {to_id}")
 
         logger.debug(
             f"_group_trains_by_section: {len(section_map)} sections, "

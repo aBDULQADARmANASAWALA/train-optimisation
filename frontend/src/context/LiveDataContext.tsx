@@ -12,7 +12,7 @@ interface LiveData {
   plan: OptimizationPlan | null;
   loading: boolean;
   error: string | null;
-  refreshData: () => Promise<void>;
+  refreshData: (forceShowLoading?: boolean) => Promise<void>;
 }
 
 const LiveDataContext = createContext<LiveData | null>(null);
@@ -53,9 +53,10 @@ export function LiveDataProvider({ children }: { children: React.ReactNode }) {
   const [error, setError] = useState<string | null>(null);
   const refreshInFlight = useRef(false);
 
-  const refreshData = async () => {
-    // Guard: skip if a previous refresh is still in-flight (prevents overlapping fetches)
-    if (refreshInFlight.current) return;
+  const refreshData = async (forceShowLoading: boolean = false) => {
+    if (forceShowLoading) setLoading(true);
+    // Guard: skip if a previous refresh is still in-flight unless we are forcing
+    if (refreshInFlight.current && !forceShowLoading) return;
     refreshInFlight.current = true;
     try {
       const [liveResult, historyResult, metricsResult, planResult] = await Promise.allSettled([

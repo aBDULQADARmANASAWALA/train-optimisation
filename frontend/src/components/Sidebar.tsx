@@ -8,7 +8,7 @@ interface SidebarProps {
   setActiveTab: (tab: string) => void;
   systemStatus: 'running' | 'frozen';
   setSystemStatus: (status: 'running' | 'frozen') => void;
-  onConflictsInjected?: () => void;
+  onConflictsInjected?: () => void | Promise<void>;
 }
 
 type InjectState = 'idle' | 'loading' | 'success' | 'error';
@@ -32,9 +32,11 @@ export function Sidebar({ activeTab, setActiveTab, systemStatus, setSystemStatus
     setInjectMsg('');
     try {
       const result = await api.injectSampleConflicts();
+      if (onConflictsInjected) {
+        await onConflictsInjected();
+      }
       setInjectState('success');
       setInjectMsg(`✓ ${result.trains_affected} trains delayed`);
-      onConflictsInjected?.();
       setTimeout(() => {
         setInjectState('idle');
         setInjectMsg('');

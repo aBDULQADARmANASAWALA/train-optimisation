@@ -126,7 +126,7 @@ def create_test_snapshot() -> OptimizationSnapshot:
             train_number="IC-101",
             station_id=station_ids["central"],
             station_name="Central Station",
-            sequence=1,
+            stop_order=1,
             scheduled_arrival=base_time + timedelta(minutes=0),
             scheduled_departure=base_time + timedelta(minutes=5),
             platform_dwell_time_minutes=5.0,
@@ -136,7 +136,7 @@ def create_test_snapshot() -> OptimizationSnapshot:
             train_number="IC-101",
             station_id=station_ids["north"],
             station_name="North Terminal",
-            sequence=2,
+            stop_order=2,
             scheduled_arrival=base_time + timedelta(minutes=17),
             scheduled_departure=base_time + timedelta(minutes=22),
             platform_dwell_time_minutes=5.0,
@@ -146,7 +146,7 @@ def create_test_snapshot() -> OptimizationSnapshot:
             train_number="IC-101",
             station_id=station_ids["east"],
             station_name="East Hub",
-            sequence=3,
+            stop_order=3,
             scheduled_arrival=base_time + timedelta(minutes=42),
             scheduled_departure=base_time + timedelta(minutes=47),
             platform_dwell_time_minutes=5.0,
@@ -160,7 +160,7 @@ def create_test_snapshot() -> OptimizationSnapshot:
             train_number="IC-102",
             station_id=station_ids["central"],
             station_name="Central Station",
-            sequence=1,
+            stop_order=1,
             scheduled_arrival=base_time + timedelta(minutes=10),
             scheduled_departure=base_time + timedelta(minutes=15),
             platform_dwell_time_minutes=5.0,
@@ -170,7 +170,7 @@ def create_test_snapshot() -> OptimizationSnapshot:
             train_number="IC-102",
             station_id=station_ids["south"],
             station_name="South Station",
-            sequence=2,
+            stop_order=2,
             scheduled_arrival=base_time + timedelta(minutes=30),
             scheduled_departure=base_time + timedelta(minutes=35),
             platform_dwell_time_minutes=5.0,
@@ -180,7 +180,7 @@ def create_test_snapshot() -> OptimizationSnapshot:
             train_number="IC-102",
             station_id=station_ids["east"],
             station_name="East Hub",
-            sequence=3,
+            stop_order=3,
             scheduled_arrival=base_time + timedelta(minutes=53),
             scheduled_departure=base_time + timedelta(minutes=58),
             platform_dwell_time_minutes=5.0,
@@ -194,7 +194,7 @@ def create_test_snapshot() -> OptimizationSnapshot:
             train_number="RG-201",
             station_id=station_ids["north"],
             station_name="North Terminal",
-            sequence=1,
+            stop_order=1,
             scheduled_arrival=base_time + timedelta(minutes=5),
             scheduled_departure=base_time + timedelta(minutes=10),
             platform_dwell_time_minutes=5.0,
@@ -204,7 +204,7 @@ def create_test_snapshot() -> OptimizationSnapshot:
             train_number="RG-201",
             station_id=station_ids["east"],
             station_name="East Hub",
-            sequence=2,
+            stop_order=2,
             scheduled_arrival=base_time + timedelta(minutes=30),
             scheduled_departure=base_time + timedelta(minutes=35),
             platform_dwell_time_minutes=5.0,
@@ -218,7 +218,7 @@ def create_test_snapshot() -> OptimizationSnapshot:
             train_number="RG-202",
             station_id=station_ids["south"],
             station_name="South Station",
-            sequence=1,
+            stop_order=1,
             scheduled_arrival=base_time + timedelta(minutes=15),
             scheduled_departure=base_time + timedelta(minutes=20),
             platform_dwell_time_minutes=5.0,
@@ -228,7 +228,7 @@ def create_test_snapshot() -> OptimizationSnapshot:
             train_number="RG-202",
             station_id=station_ids["east"],
             station_name="East Hub",
-            sequence=2,
+            stop_order=2,
             scheduled_arrival=base_time + timedelta(minutes=38),
             scheduled_departure=base_time + timedelta(minutes=43),
             platform_dwell_time_minutes=5.0,
@@ -337,7 +337,7 @@ def example_examine_adjusted_schedule(result):
             delay = stop["delay_minutes"]
             status = "✓ On time" if delay <= 0.5 else f"⚠ {delay:.1f}min late"
 
-            print(f"  {stop['sequence']}. {stop['station_name']}")
+            print(f"  {stop['stop_order']}. {stop['station_name']}")
             print(f"     Scheduled: {stop['scheduled_arrival'][11:16]}")
             print(f"     Adjusted:  {stop['adjusted_arrival'][11:16]} ({status})")
 

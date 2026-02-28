@@ -737,29 +737,76 @@ class SimulationOrchestrator:
                 enriched.update(congestion_annotations)
                 trains_with_congestion[train_id] = enriched
 
-            snap = OptimizationSnapshot(
-                timestamp=self.state_engine.current_time,
-                trains=trains_with_congestion,
-                train_stops=train_stops,
-                sections=section_infos,
-                current_positions={
-                    train_id: (
-                        UUID(info["current_section_id"]) if info.get("current_section_id") else None,
-                        UUID(info["current_station_id"]) if info.get("current_station_id") else None,
-                    )
-                    for train_id, info in self.state_engine.trains.items()
-                },
-                predicted_delays=predicted_delays,
-                platform_capacity=platform_capacity,
-            )
+            # Get conflicts before optimization
+            conflicts_before = self.state_engine.detect_conflicts()["total_conflicts"]
+            
+            horizon_to_use = self.horizon_minutes
+            max_horizon = horizon_to_use + 90  # Allow expansion up to +90 mins
+            
+            while True:
+                snap = OptimizationSnapshot(
+                    timestamp=self.state_engine.current_time,
+                    trains=trains_with_congestion,
+                    train_stops=train_stops,
+                    sections=section_infos,
+                    current_positions={
+                        train_id: (
+                            UUID(info["current_section_id"]) if info.get("current_section_id") else None,
+                            UUID(info["current_station_id"]) if info.get("current_station_id") else None,
+                        )
+                        for train_id, info in self.state_engine.trains.items()
+                    },
+                    predicted_delays=predicted_delays,
+                    platform_capacity=platform_capacity,
+                )
 
-            result = self.optimizer.optimize(
-                snap,
-                horizon_minutes=max(self.horizon_minutes, 1440),  # at least 24h to match stop collection
-                use_warm_start=True,
-            )
+                result = self.optimizer.optimize(
+                    snap,
+                    horizon_minutes=horizon_to_use,
+                    use_warm_start=True,
+                )
+                
+                prec_vars_created = 0
+                if result and result.explanation:
+                    prec_vars_created = result.explanation.get("precedence_variables_created", 0)
 
-            logger.info(f"Optimization result: {result.status.value}, weighted_delay={result.total_weighted_delay:.1f}min")
+                if result and result.status in (OptimizationStatus.OPTIMAL, OptimizationStatus.FEASIBLE):
+                    if conflicts_before > 0 and prec_vars_created == 0:
+                        logger.warning("Conflicts detected but no precedence variables created.")
+                        
+                        if horizon_to_use < max_horizon:
+                            horizon_to_use += 30
+                            logger.info(f"Automatically increasing horizon to {horizon_to_use} minutes and rebuilding model")
+                            continue
+                            
+                    # Simulate optimized schedule and detect conflicts again
+                    original_schedules = {t_id: [s.copy() for s in sched] for t_id, sched in self.state_engine.train_schedules.items()}
+                    
+                    try:
+                        # Apply adjusted timings to state engine temporarily
+                        for t_id, adjusted_stops in result.adjusted_timings.items():
+                            if t_id in self.state_engine.train_schedules:
+                                adj_map = {s["stop_order"]: s for s in adjusted_stops}
+                                for stop in self.state_engine.train_schedules[t_id]:
+                                    so = stop.get("stop_order")
+                                    if so in adj_map:
+                                        if adj_map[so]["adjusted_arrival"]:
+                                            stop["scheduled_arrival"] = adj_map[so]["adjusted_arrival"]
+                                        if adj_map[so]["adjusted_departure"]:
+                                            stop["scheduled_departure"] = adj_map[so]["adjusted_departure"]
+                        
+                        conflicts_after = self.state_engine.detect_conflicts()["total_conflicts"]
+                        result.conflicts_resolved = conflicts_before - conflicts_after
+                        
+                        logger.info(f"Conflicts before: {conflicts_before}, after simulate: {conflicts_after}, resolved: {result.conflicts_resolved}")
+                    finally:
+                        # Always revert schedules
+                        self.state_engine.train_schedules = original_schedules
+                        
+                break
+
+            if result:
+                logger.info(f"Optimization result: {result.status.value}, weighted_delay={result.total_weighted_delay:.1f}min")
             return result
 
         except Exception as e:
@@ -795,15 +842,12 @@ class SimulationOrchestrator:
                     sched_arr = datetime.fromisoformat(raw_arr) if isinstance(raw_arr, str) else raw_arr
                     sched_dep = datetime.fromisoformat(raw_dep) if isinstance(raw_dep, str) else raw_dep
 
-                    # Apply accumulated delay so optimizer starts from realistic position
+                    # Calculate effective arrival for filtering ONLY
                     effective_arr = sched_arr + delay_delta
                     effective_dep = sched_dep + delay_delta
 
-                    # Include stops that are in the future within 24h window
-                    # This handles seeded data that may be dated ahead of "now"
                     if effective_arr > extended_horizon_end:
                         continue
-                    # Skip stops that are already far in the past (>2h ago)
                     if effective_arr < now - timedelta(hours=2):
                         continue
 
@@ -813,12 +857,9 @@ class SimulationOrchestrator:
                         station_id=UUID(stop["station_id"]),
                         station_name=stop.get("station_name", ""),
                         stop_order=stop.get("stop_order", 0),
-                        scheduled_arrival=effective_arr,
-                        scheduled_departure=effective_dep,
-                        platform_dwell_time_minutes=max(
-                            1.0,
-                            (sched_dep - sched_arr).total_seconds() / 60,
-                        ),
+                        scheduled_arrival=sched_arr,
+                        scheduled_departure=sched_dep,
+                        platform_dwell_time_minutes=2.0, # Allow optimizer to shorten dwells to catch up
                     ))
                 except Exception as exc:
                     logger.debug(f"Skipping stop due to parse error: {exc}")
@@ -1012,14 +1053,10 @@ class SimulationOrchestrator:
                     self.state_engine.trains.get(train_id, {}).get("accumulated_delay_minutes", 0.0)
                 )
 
-                # The optimizer's delay_minutes can reflect large horizon offsets.
-                # We only trust it to REDUCE delay, never to increase it.
-                # Use the minimum stop-level delay as the new baseline.
-                min_opt_delay = min(float(t.get("delay_minutes", 0)) for t in timings)
-                min_opt_delay = max(0.0, min_opt_delay)  # clamp negatives to 0
-
-                # Optimization should reduce delay: take min of current vs optimizer result
-                new_delay = min(current_delay, min_opt_delay)
+                # To reflect that the optimizer has caught up time, take the delay at the *end* of the planned horizon.
+                # Timings are sorted by stop_order.
+                final_opt_delay = float(timings[-1].get("delay_minutes", 0.0)) if timings else 0.0
+                new_delay = max(0.0, final_opt_delay)
 
                 # Determine status
                 if new_delay <= 0:

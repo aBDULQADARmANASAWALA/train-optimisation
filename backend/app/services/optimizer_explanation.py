@@ -57,6 +57,7 @@ def generate_explanation(
             solver,
             snapshot,
             relevant_stops,
+            variables,
         )
         
         # 3. Calculate objective improvement
@@ -187,6 +188,7 @@ def _extract_precedence_decisions(
     solver,
     snapshot,
     relevant_stops: List,
+    variables: Dict = None,
 ) -> List[Dict[str, Any]]:
     """
     Extract precedence decisions from solver and convert to human-readable explanations.
@@ -251,23 +253,42 @@ def _extract_precedence_decisions(
             
             headway = section.headway_minutes if section else 5.0
             
-            # Generate explanation
-            explanation = (
-                f"Train {yielded_number} was held at {section_name.split('–')[0]} "
-                f"to allow Train {priority_number} to pass, "
-                f"maintaining {headway:.0f}-minute headway separation."
-            )
+            # Get delay impact if departure times are present
+            delay_impact = 0.0
+            from_station_name = section_name.split('–')[0] if '–' in section_name else "station"
+            departure_times = variables.get("departure_times", {}) if variables else {}
+            
+            if departure_times:
+                for stop in relevant_stops:
+                    if stop.train_id == yielded_train and stop.station_name == from_station_name:
+                        stop_id = (stop.train_id, stop.station_id, stop.stop_order)
+                        if stop_id in departure_times:
+                            try:
+                                actual_dep = solver.Value(departure_times[stop_id])
+                                sched_dep = int((stop.scheduled_departure - variables["horizon_start"]).total_seconds() / 60)
+                                delay_impact = max(0.0, actual_dep - sched_dep)
+                            except Exception:
+                                pass
+                        break
+            
+            problem = f"Conflict detected on {section_name}"
+            solution = f"Train {yielded_number} yielded to Train {priority_number}"
+            impact = f"Held for {max(delay_impact, headway):.1f} mins due to headway enforcement"
+            
+            explanation_text = f"Problem: {problem}\nSolution: {solution}\nImpact: {impact}"
             
             decisions.append({
-                "priority_train": priority_number,
-                "priority_train_id": str(priority_train),
-                "yielded_train": yielded_number,
-                "yielded_train_id": str(yielded_train),
                 "section_name": section_name,
+                "priority_train": priority_number,
+                "yielded_train": yielded_number,
+                "minutes_held": round(max(delay_impact, headway), 2),
+                "reason": "headway enforcement / priority weight",
+                "delay_impact": round(max(delay_impact, headway), 2),
+                "explanation": explanation_text,
+                "priority_train_id": str(priority_train),
+                "yielded_train_id": str(yielded_train),
                 "section_id": str(section_id),
                 "action": "hold",
-                "reason": f"headway_separation_{headway:.0f}min",
-                "explanation": explanation,
                 "headway_minutes": headway,
             })
             

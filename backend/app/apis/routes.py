@@ -804,15 +804,9 @@ async def inject_sample_conflicts(
         count = min(max(2, len(pairs) // 3), 4)
         chosen = pairs[:count]
 
-        # Pick one existing section to crowd (triggers capacity conflict)
-        # This ensures trains compete for the same section, triggering precedence decisions
-        crowded_section_id: Optional[str] = None
-        if len(chosen) >= 2:
-            existing_sections = [
-                p[0].current_section_id for p in chosen if p[0].current_section_id
-            ]
-            if existing_sections:
-                crowded_section_id = str(existing_sections[0])
+        # We do NOT force trains into the same section anymore because it breaks
+        # structural consistency with their schedules in the CP-SAT optimizer.
+        # Delaying them is enough to test optimization recovery or natural overlaps.
 
         injected = []
         # Use higher delays to ensure trains are in optimization window (next 24h)
@@ -833,15 +827,7 @@ async def inject_sample_conflicts(
             )
             state.status = TrainStatus.DELAYED
 
-            # CRITICAL: Put ALL chosen trains into the same section to guarantee
-            # they compete for the same resource, forcing the optimizer to make
-            # precedence decisions that will appear in the explanation
-            if crowded_section_id:
-                from uuid import UUID as _UUID
-                try:
-                    state.current_section_id = _UUID(crowded_section_id)
-                except Exception:
-                    pass  # section_id may already be correct type
+
 
             injected.append({
                 "train_id": str(state.train_id),
@@ -855,9 +841,7 @@ async def inject_sample_conflicts(
         db.commit()
 
         msg = (
-            f"Injected conflicts: {count} trains now delayed by 25–45 min. "
-            f"{'All trains placed in same section to guarantee precedence decisions and full explanations. ' if crowded_section_id else ''}"
-            "Click 'Force Optimization' to see detailed explanations."
+            f"Click 'Force Optimization' to see the adjusted schedules."
         )
         logger.info(msg)
         return ConflictInjectionResponse(
@@ -888,13 +872,13 @@ async def reset_conflicts(
     logger.info("POST /conflicts/reset - Resetting all train delays")
     
     try:
-        # Get all train states with delays
-        delayed_states = db.query(TrainState).filter(TrainState.accumulated_delay_minutes > 0).all()
+        all_states = db.query(TrainState).all()
         
         trains_reset = 0
-        for state in delayed_states:
+        for state in all_states:
             state.accumulated_delay_minutes = 0.0
             state.status = TrainStatus.IN_TRANSIT
+            state.current_section_id = None
             trains_reset += 1
         
         db.commit()
