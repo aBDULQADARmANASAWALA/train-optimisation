@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field
 
 from app.config import get_settings
 from app.repositories import TrainRepository, SectionRepository
+from app.models import OptimizationLog
 from app.services import (
     RailwayStateEngine,
     OptimizationService,
@@ -30,6 +31,7 @@ from app.services import (
     ExecutionStatus,
 )
 from sqlalchemy.orm import Session
+from sqlalchemy import desc
 
 
 logger = logging.getLogger(__name__)
@@ -142,6 +144,25 @@ class SectionLoad(BaseModel):
     utilization_percent: float
 
 
+class ConflictInfo(BaseModel):
+    """Conflict information"""
+    id: str
+    type: str
+    location: str
+    trains_involved: List[str]
+    severity: str
+    resolved: bool
+
+
+class PlatformInfo(BaseModel):
+    """Platform occupancy information"""
+    id: str
+    station_name: str
+    platform_number: str
+    is_occupied: bool
+    occupying_train_id: Optional[str] = None
+
+
 class NetworkState(BaseModel):
     """Current network state"""
     timestamp: datetime
@@ -153,6 +174,8 @@ class NetworkState(BaseModel):
     current_conflicts: int
     trains: List[TrainInfo]
     sections: List[SectionLoad]
+    platforms: List[PlatformInfo]
+    conflicts: List[ConflictInfo]
 
 
 class KPIDashboard(BaseModel):
@@ -182,6 +205,15 @@ class OptimizationResult(BaseModel):
     validated: bool
     optimization_success: bool
     message: str
+
+
+class OptimizationRunInfo(BaseModel):
+    """Information about a past optimization run"""
+    id: str
+    timestamp: datetime
+    total_delay_reduced: float
+    conflicts_resolved: int
+    status: str
 
 
 class ManualOverrideRequest(BaseModel):
@@ -358,6 +390,58 @@ async def get_live_state(
                     )
                 )
 
+        # Build platform info from state engine
+        platforms = []
+        for station_id, occupants in state_engine.platform_occupancy.items():
+            # Get station properties from graph
+            station_props = state_engine.graph.nodes.get(station_id, {}).get("properties", {})
+            station_name = station_props.get("name", f"Station {str(station_id)[:4]}")
+            
+            # Since we don't have separate platform entities, we simulate them 
+            # based on occupancy and total_platforms.
+            total_platforms = station_props.get("total_platforms", 4)
+            
+            for i in range(1, total_platforms + 1):
+                occupant_id = None
+                if i <= len(occupants):
+                    occupant_id = str(occupants[i-1][0])
+                
+                platforms.append(
+                    PlatformInfo(
+                        id=f"P-{str(station_id)[:4]}-{i}",
+                        station_name=station_name,
+                        platform_number=str(i),
+                        is_occupied=occupant_id is not None,
+                        occupying_train_id=occupant_id
+                    )
+                )
+
+        # Map conflicts
+        conflicts_snap = snapshot.get("conflicts", {})
+        conflicts = []
+        
+        # Capacity conflicts
+        for c in conflicts_snap.get("capacity_conflicts", []):
+            conflicts.append(ConflictInfo(
+                id=f"CAP-{c['section_id'][:4]}-{datetime.utcnow().timestamp()}",
+                type="capacity",
+                location=c['section_id'],
+                trains_involved=c['train_ids'],
+                severity="high" if c['current_occupancy'] > c['capacity'] else "medium",
+                resolved=False
+            ))
+            
+        # Headway conflicts
+        for c in conflicts_snap.get("headway_conflicts", []):
+            conflicts.append(ConflictInfo(
+                id=f"HDW-{c['section_id'][:4]}-{datetime.utcnow().timestamp()}",
+                type="headway",
+                location=c['section_id'],
+                trains_involved=c['train_pair'],
+                severity="medium",
+                resolved=False
+            ))
+
         occupancy = snapshot.get("occupancy_summary", {})
         total_sections = snapshot["network_stats"]["total_sections"]
         avg_util = (
@@ -376,6 +460,8 @@ async def get_live_state(
             current_conflicts=snapshot.get("conflicts", {}).get("total_conflicts", 0),
             trains=trains,
             sections=section_loads,
+            platforms=platforms,
+            conflicts=conflicts
         )
 
         logger.debug(f"State fetched: {response.active_trains} trains, {response.current_conflicts} conflicts")
@@ -480,6 +566,44 @@ async def set_manual_override(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to set override: {str(e)}",
+        )
+
+
+# ============================================================================
+# Optimization History
+# ============================================================================
+
+@router.get("/optimization/history", response_model=List[OptimizationRunInfo])
+async def get_optimization_history(
+    limit: int = 10,
+    db: Session = Depends(get_db_session),
+) -> List[OptimizationRunInfo]:
+    """
+    Get history of optimization runs from Supabase.
+    """
+    try:
+        logs = (
+            db.query(OptimizationLog)
+            .order_by(desc(OptimizationLog.timestamp))
+            .limit(limit)
+            .all()
+        )
+        
+        return [
+            OptimizationRunInfo(
+                id=str(log.id),
+                timestamp=log.timestamp,
+                total_delay_reduced=log.total_weighted_delay,
+                conflicts_resolved=log.conflicts_detected,
+                status="success" # Logs only store successful runs usually
+            )
+            for log in logs
+        ]
+    except Exception as e:
+        logger.error(f"Failed to fetch optimization history: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to fetch history: {str(e)}"
         )
 
 
