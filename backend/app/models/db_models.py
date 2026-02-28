@@ -348,6 +348,6 @@ class OptimizationLog(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     __table_args__ = (
-        Index("idx_optimization_log_timestamp", "timestamp"),
+        Index("idx_optimization_log_timestamp_desc", "timestamp", postgresql_ops={"timestamp": "DESC"}),
         Index("idx_optimization_log_created", "created_at"),
     )

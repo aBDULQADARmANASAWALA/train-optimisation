@@ -438,8 +438,11 @@ async def get_live_state(
         # Capacity conflicts
         for c in conflicts_snap.get("capacity_conflicts", []):
             sec_id_str = str(c.get("section_id", ""))[:8]
+            # Use deterministic ID based on section and trains to prevent duplicates
+            train_ids = sorted([str(t)[:8] for t in c.get("train_ids", [])])
+            conflict_id = f"CAP-{sec_id_str}-{'-'.join(train_ids)}"
             conflicts.append(ConflictInfo(
-                id=f"CAP-{sec_id_str}-{int(datetime.utcnow().timestamp())}",
+                id=conflict_id,
                 type="capacity",
                 location=str(c.get("section_id", "")),
                 trains_involved=[str(t) for t in c.get("train_ids", [])],
@@ -450,8 +453,11 @@ async def get_live_state(
         # Headway conflicts
         for c in conflicts_snap.get("headway_conflicts", []):
             sec_id_str = str(c.get("section_id", ""))[:8]
+            # Use deterministic ID based on section and train pair to prevent duplicates
+            train_pair = sorted([str(t)[:8] for t in c.get("train_pair", [])])
+            conflict_id = f"HDW-{sec_id_str}-{'-'.join(train_pair)}"
             conflicts.append(ConflictInfo(
-                id=f"HDW-{sec_id_str}-{int(datetime.utcnow().timestamp())}",
+                id=conflict_id,
                 type="headway",
                 location=str(c.get("section_id", "")),
                 trains_involved=[str(t) for t in c.get("train_pair", [])],
@@ -613,17 +619,20 @@ async def set_manual_override(
 
 @router.get("/optimization/history", response_model=List[OptimizationRunInfo])
 async def get_optimization_history(
-    limit: int = 10,
     db: Session = Depends(get_db_session),
 ) -> List[OptimizationRunInfo]:
     """
-    Get history of optimization runs from Supabase.
+    Get the 5 most recent optimization runs from the database.
+    
+    Uses database-level filtering with ORDER BY timestamp DESC LIMIT 5
+    for efficiency. Returns only required fields: run_id, run_time,
+    total_weighted_delay, conflicts_fixed.
     """
     try:
         logs = (
             db.query(OptimizationLog)
             .order_by(desc(OptimizationLog.timestamp))
-            .limit(limit)
+            .limit(5)
             .all()
         )
         
@@ -633,7 +642,7 @@ async def get_optimization_history(
                 timestamp=log.timestamp,
                 total_delay_reduced=log.total_weighted_delay,
                 conflicts_resolved=log.conflicts_detected,
-                status="success" # Logs only store successful runs usually
+                status="success"
             )
             for log in logs
         ]
@@ -680,11 +689,13 @@ async def get_latest_optimization_plan(
 
         # Parse the JSON plan stored in notes
         plan = []
+        explanation = None
         meta = {}
         if latest_log.notes:
             try:
                 meta = _json.loads(latest_log.notes)
                 plan = meta.get("plan", [])
+                explanation = meta.get("explanation")  # Structured explanation from optimizer
             except Exception:
                 # notes may be plain text from older runs
                 plan = []
@@ -695,6 +706,7 @@ async def get_latest_optimization_plan(
             "total_weighted_delay": latest_log.total_weighted_delay,
             "solver_runtime_seconds": latest_log.solver_runtime,
             "plan": plan,  # list of {train_id, train_number, action, max_delay_minutes, stops}
+            "explanation": explanation,  # Structured explanation with conflicts, decisions, metrics
         }
 
     except Exception as e:
@@ -737,6 +749,168 @@ async def get_status(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to get status: {str(e)}",
+        )
+
+
+# ============================================================================
+# Sample Conflict Injection
+# ============================================================================
+
+class ConflictInjectionResponse(BaseModel):
+    """Response from sample conflict injection"""
+    trains_affected: int
+    injected_conflicts: List[Dict[str, Any]]
+    message: str
+
+
+@router.post("/conflicts/inject", response_model=ConflictInjectionResponse)
+async def inject_sample_conflicts(
+    db: Session = Depends(get_db_session),
+) -> ConflictInjectionResponse:
+    """
+    Inject sample conflicts into the database for demonstration / testing.
+
+    Picks 2-4 random active trains and bumps their accumulated_delay_minutes
+    so the optimizer has fresh conflicts to resolve.  Also puts some of them
+    into the same section to trigger capacity / headway conflicts.
+
+    Returns:
+        ConflictInjectionResponse listing which trains were affected and by
+        how much delay was injected.
+    """
+    import random
+    logger.info("POST /conflicts/inject - Injecting sample conflicts")
+
+    try:
+        # Pull every train that has a state row (so we can update it)
+        pairs = (
+            db.query(TrainState, Train)
+            .join(Train, TrainState.train_id == Train.id)
+            .filter(
+                TrainState.status.notin_([TrainStatus.COMPLETED, TrainStatus.CANCELLED])
+            )
+            .all()
+        )
+
+        if not pairs:
+            return ConflictInjectionResponse(
+                trains_affected=0,
+                injected_conflicts=[],
+                message="No active trains found in the database. Run the mock data generator first.",
+            )
+
+        # Shuffle and pick a subset (between 2 and min(4, total))
+        random.shuffle(pairs)
+        count = min(max(2, len(pairs) // 3), 4)
+        chosen = pairs[:count]
+
+        # Pick one existing section to crowd (triggers capacity conflict)
+        # This ensures trains compete for the same section, triggering precedence decisions
+        crowded_section_id: Optional[str] = None
+        if len(chosen) >= 2:
+            existing_sections = [
+                p[0].current_section_id for p in chosen if p[0].current_section_id
+            ]
+            if existing_sections:
+                crowded_section_id = str(existing_sections[0])
+
+        injected = []
+        # Use higher delays to ensure trains are in optimization window (next 24h)
+        # and create overlapping schedules that require precedence decisions
+        delay_options = [25, 30, 35, 40, 45]
+
+        for idx, (state, train) in enumerate(chosen):
+            # Apply progressively different delays to create temporal overlap
+            if idx == 0:
+                delay = 45  # Heavy delay - will likely yield
+            elif idx == 1:
+                delay = 30  # Medium delay - will compete
+            else:
+                delay = random.choice(delay_options)
+            
+            state.accumulated_delay_minutes = (state.accumulated_delay_minutes or 0.0) + delay
+            state.status = TrainStatus.DELAYED
+
+            # CRITICAL: Put ALL chosen trains into the same section to guarantee
+            # they compete for the same resource, forcing the optimizer to make
+            # precedence decisions that will appear in the explanation
+            if crowded_section_id:
+                from uuid import UUID as _UUID
+                try:
+                    state.current_section_id = _UUID(crowded_section_id)
+                except Exception:
+                    pass  # section_id may already be correct type
+
+            injected.append({
+                "train_id": str(state.train_id),
+                "train_number": train.train_number,
+                "delay_added_minutes": delay,
+                "total_delay_minutes": state.accumulated_delay_minutes,
+                "status": TrainStatus.DELAYED.value,
+                "section_id": str(state.current_section_id) if state.current_section_id else None,
+            })
+
+        db.commit()
+
+        msg = (
+            f"Injected conflicts: {count} trains now delayed by 25–45 min. "
+            f"{'All trains placed in same section to guarantee precedence decisions and full explanations. ' if crowded_section_id else ''}"
+            "Click 'Force Optimization' to see detailed explanations."
+        )
+        logger.info(msg)
+        return ConflictInjectionResponse(
+            trains_affected=count,
+            injected_conflicts=injected,
+            message=msg,
+        )
+
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Conflict injection failed: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Conflict injection failed: {str(e)}",
+        )
+
+
+@router.post("/conflicts/reset", tags=["conflicts"])
+async def reset_conflicts(
+    db: Session = Depends(get_db_session),
+) -> Dict[str, Any]:
+    """
+    Reset all train delays to 0 to clear persistent conflicts.
+    
+    This endpoint clears all accumulated delays from the database,
+    effectively resetting the system to a clean state.
+    """
+    logger.info("POST /conflicts/reset - Resetting all train delays")
+    
+    try:
+        # Get all train states with delays
+        delayed_states = db.query(TrainState).filter(TrainState.accumulated_delay_minutes > 0).all()
+        
+        trains_reset = 0
+        for state in delayed_states:
+            state.accumulated_delay_minutes = 0.0
+            state.status = TrainStatus.IN_TRANSIT
+            trains_reset += 1
+        
+        db.commit()
+        
+        logger.info(f"Reset {trains_reset} train delays to 0")
+        
+        return {
+            "status": "success",
+            "trains_reset": trains_reset,
+            "message": f"Reset {trains_reset} train delays. All conflicts cleared.",
+        }
+        
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Reset failed: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Reset failed: {str(e)}",
         )
 
 
@@ -822,115 +996,3 @@ async def get_model_status(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to get model status: {str(e)}",
         )
-
-
-# ============================================================================
-# Sample Conflict Injection
-# ============================================================================
-
-class ConflictInjectionResponse(BaseModel):
-    """Response from sample conflict injection"""
-    trains_affected: int
-    injected_conflicts: List[Dict[str, Any]]
-    message: str
-
-
-@router.post("/conflicts/inject", response_model=ConflictInjectionResponse)
-async def inject_sample_conflicts(
-    db: Session = Depends(get_db_session),
-) -> ConflictInjectionResponse:
-    """
-    Inject sample conflicts into the database for demonstration / testing.
-
-    Picks 2-4 random active trains and bumps their accumulated_delay_minutes
-    so the optimizer has fresh conflicts to resolve.  Also puts some of them
-    into the same section to trigger capacity / headway conflicts.
-
-    Returns:
-        ConflictInjectionResponse listing which trains were affected and by
-        how much delay was injected.
-    """
-    import random
-    logger.info("POST /conflicts/inject - Injecting sample conflicts")
-
-    try:
-        # Pull every train that has a state row (so we can update it)
-        pairs = (
-            db.query(TrainState, Train)
-            .join(Train, TrainState.train_id == Train.id)
-            .filter(
-                TrainState.status.notin_([TrainStatus.COMPLETED, TrainStatus.CANCELLED])
-            )
-            .all()
-        )
-
-        if not pairs:
-            return ConflictInjectionResponse(
-                trains_affected=0,
-                injected_conflicts=[],
-                message="No active trains found in the database. Run the mock data generator first.",
-            )
-
-        # Shuffle and pick a subset (between 2 and min(4, total))
-        random.shuffle(pairs)
-        count = min(max(2, len(pairs) // 3), 4)
-        chosen = pairs[:count]
-
-        # Optionally pick one existing section to crowd (triggers capacity conflict)
-        # Pull a section that already has a train so headway maths is realistic
-        crowded_section_id: Optional[str] = None
-        if len(chosen) >= 2:
-            existing_sections = [
-                p[0].current_section_id for p in chosen if p[0].current_section_id
-            ]
-            if existing_sections:
-                crowded_section_id = str(existing_sections[0])
-
-        injected = []
-        delay_options = [12, 15, 18, 22, 28, 35, 45]
-
-        for idx, (state, train) in enumerate(chosen):
-            delay = random.choice(delay_options)
-            state.accumulated_delay_minutes = (state.accumulated_delay_minutes or 0.0) + delay
-            state.status = TrainStatus.DELAYED
-
-            # Put the first two trains into the same section to create a
-            # capacity / headway conflict that the optimiser can detect
-            if crowded_section_id and idx < 2:
-                from uuid import UUID as _UUID
-                try:
-                    state.current_section_id = _UUID(crowded_section_id)
-                except Exception:
-                    pass  # section_id may already be correct type
-
-            injected.append({
-                "train_id": str(state.train_id),
-                "train_number": train.train_number,
-                "delay_added_minutes": delay,
-                "total_delay_minutes": state.accumulated_delay_minutes,
-                "status": TrainStatus.DELAYED.value,
-                "section_id": str(state.current_section_id) if state.current_section_id else None,
-            })
-
-        db.commit()
-
-        msg = (
-            f"Injected conflicts: {count} trains now delayed by 12–45 min. "
-            f"{'Two trains placed in same section to trigger a capacity conflict. ' if crowded_section_id else ''}"
-            "Click 'Force Optimization' to resolve."
-        )
-        logger.info(msg)
-        return ConflictInjectionResponse(
-            trains_affected=count,
-            injected_conflicts=injected,
-            message=msg,
-        )
-
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Conflict injection failed: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Conflict injection failed: {str(e)}",
-        )
- 

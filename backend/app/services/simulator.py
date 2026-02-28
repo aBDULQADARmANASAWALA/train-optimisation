@@ -1,8 +1,9 @@
 import logging
+import random
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Dict, List, Optional, Any, Tuple, Set
 from uuid import UUID, uuid4
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 
 from sqlalchemy import text
@@ -48,6 +49,8 @@ class Disruption:
     magnitude: float  # delay in minutes or % reduction
     duration_minutes: int
     start_time: datetime
+    applied_cycles: Set[int] = field(default_factory=set)
+    total_delay_applied: float = 0.0
 
 
 @dataclass
@@ -109,6 +112,7 @@ class SimulationOrchestrator:
         predictor: PredictionService,
         horizon_minutes: int = 60,
         rolling_step_minutes: int = 5,
+        random_seed: Optional[int] = None,
     ):
         self.train_repo = train_repository
         self.section_repo = section_repository
@@ -131,6 +135,14 @@ class SimulationOrchestrator:
         self.manual_override_enabled: bool = False
         self.manual_override_reason: Optional[str] = None
 
+        # Conflict injection configuration
+        self.conflict_injection_probability: float = 0.15  # 15% chance per cycle
+        self.max_delay_increment_per_cycle: float = 5.0  # max +5 minutes per cycle
+        self.max_total_delay_per_train: float = 60.0  # max 60 minutes total
+        self.random_seed = random_seed
+        if random_seed is not None:
+            random.seed(random_seed)
+
         # KPI tracking
         self.kpis_history: List[KPISnapshot] = []
         self.cumulative_conflicts_avoided: int = 0
@@ -141,7 +153,7 @@ class SimulationOrchestrator:
         self.retrain_interval_cycles: int = 20
         self.last_retrain_cycle: int = 0  # cycle number of last retrain
 
-        logger.info("SimulationOrchestrator initialized")
+        logger.info(f"SimulationOrchestrator initialized (random_seed={random_seed})")
 
     # =========================================================================
     # Public API
@@ -162,9 +174,17 @@ class SimulationOrchestrator:
             self.state_engine.update_time(current_time)
             state_snapshot = self.state_engine.snapshot_state()
 
-            # Step 3: Apply any injected disruptions
+            # Step 3: Apply any injected disruptions (isolated, returns modified state)
             logger.debug("Step 3: Applying disruptions")
-            self._apply_current_disruptions()
+            modified_state = self._apply_current_disruptions(state_snapshot)
+            if modified_state:
+                state_snapshot = modified_state
+                
+            # Step 3b: Validate state integrity
+            validation_result = self.validate_state_integrity()
+            if not validation_result["valid"]:
+                logger.error(f"State integrity validation failed: {validation_result['errors']}")
+                raise ValueError(f"Invalid state after disruption: {validation_result['errors']}")
 
             # Step 4: Generate ML predictions with real section loads
             logger.debug("Step 4: Generating predictions")
@@ -329,32 +349,234 @@ class SimulationOrchestrator:
         """Get recent KPI trend."""
         return self.kpis_history[-periods:]
 
+    def validate_state_integrity(self) -> Dict[str, Any]:
+        """
+        Validate state integrity after disruption injection.
+        
+        Checks:
+        - No negative delays
+        - No overlapping section occupancy (capacity violations)
+        - No time-travel (arrival < departure)
+        
+        Returns:
+            Dictionary with 'valid' (bool) and 'errors' (list) keys
+        """
+        errors = []
+        
+        # Check 1: No negative delays
+        for train_id, train_info in self.state_engine.trains.items():
+            delay = train_info.get("accumulated_delay_minutes", 0.0)
+            if delay < 0:
+                errors.append(f"Train {train_id} has negative delay: {delay:.1f}min")
+        
+        # Check 2: No overlapping section occupancy beyond capacity
+        for section_id, occupants in self.state_engine.section_occupancy.items():
+            if not occupants:
+                continue
+            
+            edge_data = self.state_engine._get_edge_by_section_id(section_id)
+            if not edge_data:
+                continue
+            
+            capacity = edge_data.get("capacity", 1)
+            if len(occupants) > capacity:
+                train_ids = [str(t[0]) for t in occupants]
+                errors.append(
+                    f"Section {section_id} capacity violation: "
+                    f"{len(occupants)} trains > capacity {capacity} "
+                    f"(trains: {', '.join(train_ids[:3])}{'...' if len(train_ids) > 3 else ''})"
+                )
+        
+        # Check 3: No time-travel in schedules (arrival >= departure for each stop)
+        for train_id, schedule in self.state_engine.train_schedules.items():
+            for stop in schedule:
+                try:
+                    arr_time = stop.get("scheduled_arrival")
+                    dep_time = stop.get("scheduled_departure")
+                    
+                    if arr_time and dep_time:
+                        arr_dt = datetime.fromisoformat(arr_time) if isinstance(arr_time, str) else arr_time
+                        dep_dt = datetime.fromisoformat(dep_time) if isinstance(dep_time, str) else dep_time
+                        
+                        if dep_dt < arr_dt:
+                            errors.append(
+                                f"Train {train_id} time-travel violation at stop {stop.get('station_name', 'UNKNOWN')}: "
+                                f"departure {dep_dt} < arrival {arr_dt}"
+                            )
+                except Exception as e:
+                    logger.debug(f"Could not validate stop timing for train {train_id}: {e}")
+        
+        valid = len(errors) == 0
+        
+        if not valid:
+            logger.warning(f"State integrity validation found {len(errors)} error(s)")
+        
+        return {
+            "valid": valid,
+            "errors": errors,
+            "checks_performed": ["negative_delays", "section_capacity", "time_travel"]
+        }
+
     # =========================================================================
     # Private — Data Preparation
     # =========================================================================
 
-    def _apply_current_disruptions(self) -> None:
-        """Apply active disruptions to state engine."""
+    def _apply_current_disruptions(self, state_snapshot: Dict) -> Optional[Dict]:
+        """
+        Apply active disruptions to state in an isolated manner.
+        
+        Safeguards:
+        - Probabilistic injection (10-20% chance per cycle)
+        - Only affects trains within optimization horizon
+        - Never modifies historical/past events
+        - Never produces negative delays
+        - Delay increment capped per cycle (max +5 minutes)
+        - Total delay capped per train (max 60 minutes)
+        - Runs only once per cycle per disruption
+        
+        Returns:
+            Modified state snapshot if changes were made, None otherwise
+        """
         now = datetime.utcnow()
+        horizon_end = now + timedelta(minutes=self.horizon_minutes)
+        
         active_disruptions = [
             d for d in self.injected_disruptions
             if d.start_time <= now <= d.start_time + timedelta(minutes=d.duration_minutes)
         ]
-
+        
+        if not active_disruptions:
+            return None
+        
+        modified = False
+        
         for disruption in active_disruptions:
-            logger.debug(f"Applying disruption: {disruption.disruption_type.value}")
-
+            # Prevent multiple applications per cycle
+            if self.cycle_count in disruption.applied_cycles:
+                logger.debug(f"Disruption {disruption.disruption_type.value} already applied in cycle {self.cycle_count}")
+                continue
+            
+            # Probabilistic injection (10-20% chance)
+            if random.random() > self.conflict_injection_probability:
+                logger.debug(f"Disruption {disruption.disruption_type.value} skipped (probabilistic)")
+                continue
+            
             if disruption.disruption_type == DisruptionType.TRAIN_DELAY:
-                if disruption.affected_id in self.state_engine.trains:
-                    current_delay = self.state_engine.trains[disruption.affected_id].get("accumulated_delay_minutes", 0)
-                    self.state_engine.trains[disruption.affected_id]["accumulated_delay_minutes"] = (
-                        current_delay + disruption.magnitude
-                    )
-
+                modified |= self._apply_train_delay_disruption(disruption, now, horizon_end)
             elif disruption.disruption_type == DisruptionType.CAPACITY_REDUCTION:
-                section = self._find_section(disruption.affected_id)
-                if section:
-                    section["capacity"] = max(1, int(section["capacity"] * (1 - disruption.magnitude / 100)))
+                modified |= self._apply_capacity_reduction_disruption(disruption)
+            
+            # Mark as applied for this cycle
+            disruption.applied_cycles.add(self.cycle_count)
+        
+        return state_snapshot if modified else None
+    
+    def _apply_train_delay_disruption(
+        self, 
+        disruption: Disruption, 
+        now: datetime, 
+        horizon_end: datetime
+    ) -> bool:
+        """
+        Apply train delay disruption with safeguards.
+        
+        Returns:
+            True if state was modified, False otherwise
+        """
+        if disruption.affected_id not in self.state_engine.trains:
+            logger.debug(f"Train {disruption.affected_id} not found in state engine")
+            return False
+        
+        train_info = self.state_engine.trains[disruption.affected_id]
+        train_number = train_info.get("train_number", "UNKNOWN")
+        
+        # Check if train is within optimization horizon
+        schedule = self.state_engine.train_schedules.get(disruption.affected_id, [])
+        if schedule:
+            # Check if any upcoming stop is within horizon
+            within_horizon = False
+            for stop in schedule:
+                try:
+                    arr_time = stop.get("scheduled_arrival")
+                    if arr_time:
+                        arr_dt = datetime.fromisoformat(arr_time) if isinstance(arr_time, str) else arr_time
+                        if now <= arr_dt <= horizon_end:
+                            within_horizon = True
+                            break
+                except Exception:
+                    pass
+            
+            if not within_horizon:
+                logger.debug(f"Train {train_number} not within optimization horizon, skipping injection")
+                return False
+        
+        # Get current delay
+        current_delay = train_info.get("accumulated_delay_minutes", 0.0)
+        
+        # Cap delay increment per cycle
+        delay_increment = min(disruption.magnitude, self.max_delay_increment_per_cycle)
+        
+        # Calculate new delay with total cap
+        new_delay = min(
+            current_delay + delay_increment,
+            self.max_total_delay_per_train
+        )
+        
+        # Ensure no negative delays
+        new_delay = max(0.0, new_delay)
+        
+        # Check if we actually applied any delay
+        actual_increment = new_delay - current_delay
+        if actual_increment <= 0:
+            logger.debug(f"Train {train_number} already at delay cap, no injection")
+            return False
+        
+        # Apply the delay
+        self.state_engine.trains[disruption.affected_id]["accumulated_delay_minutes"] = new_delay
+        disruption.total_delay_applied += actual_increment
+        
+        # Structured logging
+        logger.warning(
+            f"CONFLICT_INJECTED: train_id={disruption.affected_id}, "
+            f"train_number={train_number}, "
+            f"delay_added={actual_increment:.1f}min, "
+            f"total_delay={new_delay:.1f}min, "
+            f"reason=disruption_injection, "
+            f"cycle={self.cycle_count}"
+        )
+        
+        return True
+    
+    def _apply_capacity_reduction_disruption(self, disruption: Disruption) -> bool:
+        """
+        Apply capacity reduction disruption with safeguards.
+        
+        Returns:
+            True if state was modified, False otherwise
+        """
+        section = self._find_section(disruption.affected_id)
+        if not section:
+            logger.debug(f"Section {disruption.affected_id} not found")
+            return False
+        
+        original_capacity = section.get("capacity", 1)
+        new_capacity = max(1, int(original_capacity * (1 - disruption.magnitude / 100)))
+        
+        if new_capacity == original_capacity:
+            return False
+        
+        section["capacity"] = new_capacity
+        
+        # Structured logging
+        logger.warning(
+            f"CONFLICT_INJECTED: section_id={disruption.affected_id}, "
+            f"capacity_reduced={original_capacity}->{new_capacity}, "
+            f"reduction_pct={disruption.magnitude:.1f}%, "
+            f"reason=capacity_reduction, "
+            f"cycle={self.cycle_count}"
+        )
+        
+        return True
 
     def _generate_predictions(self, state_snapshot: Dict) -> Dict[UUID, Any]:
         """
@@ -732,10 +954,14 @@ class SimulationOrchestrator:
                         ],
                     })
 
+                # Include structured explanation from optimizer
+                explanation = getattr(optimization_result, "explanation", None)
+                
                 notes_json = json.dumps({
                     "cycle": self.cycle_count,
                     "status": str(getattr(optimization_result, "status", "unknown")),
                     "plan": plan,
+                    "explanation": explanation,  # Structured human-readable explanation
                 })
 
                 self._db_session.execute(

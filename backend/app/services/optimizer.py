@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 from ortools.sat.python import cp_model
+from app.services.optimizer_explanation import generate_explanation
 
 
 logger = logging.getLogger(__name__)
@@ -72,6 +73,7 @@ class OptimizedSchedule:
     adjusted_timings: Dict[UUID, List[Dict[str, Any]]]  # train_id -> list of adjusted stops
     infeasibility_reasons: List[str]
     warm_start_applied: bool
+    explanation: Optional[Dict[str, Any]] = None  # Structured human-readable explanation
 
 
 class OptimizationService:
@@ -690,6 +692,16 @@ class OptimizationService:
         except Exception:
             pass  # Solver may not have values for unused vars
 
+        # Generate structured explanation
+        explanation = self._generate_explanation(
+            solver,
+            variables,
+            snapshot,
+            relevant_stops,
+            adjusted_timings,
+            total_weighted_delay,
+        )
+
         logger.info(
             f"Solution extracted: {len(trains_adjusted)} trains adjusted, "
             f"total weighted delay: {total_weighted_delay:.2f} min, "
@@ -709,6 +721,7 @@ class OptimizationService:
             adjusted_timings=adjusted_timings,
             infeasibility_reasons=infeasibility_reasons,
             warm_start_applied=warm_start_applied,
+            explanation=explanation,
         )
 
     def _store_solution(
@@ -854,3 +867,41 @@ class OptimizationService:
             if stop.stop_order == current.stop_order + 1:
                 return stop
         return None
+
+    def _generate_explanation(
+        self,
+        solver: cp_model.CpSolver,
+        variables: Dict[str, Any],
+        snapshot: OptimizationSnapshot,
+        relevant_stops: List[TrainStop],
+        adjusted_timings: Dict[UUID, List[Dict[str, Any]]],
+        total_weighted_delay: float,
+    ) -> Dict[str, Any]:
+        """
+        Generate structured, human-readable explanation of optimization results.
+        
+        Converts raw CP-SAT solver outputs into domain language with:
+        - Conflict descriptions (section names, overlapping trains)
+        - Precedence decisions (which train yielded, which got priority)
+        - Comparative metrics (before/after delay)
+        - Per-train actions and reasons
+        
+        Args:
+            solver: CP-SAT solver with solution
+            variables: Decision variables
+            snapshot: Input snapshot
+            relevant_stops: Stops in optimization window
+            adjusted_timings: Optimized schedule
+            total_weighted_delay: Total weighted delay from solution
+            
+        Returns:
+            Structured explanation dictionary
+        """
+        return generate_explanation(
+            solver,
+            variables,
+            snapshot,
+            relevant_stops,
+            adjusted_timings,
+            total_weighted_delay,
+        )

@@ -88,6 +88,53 @@ export interface OptimizationPlanEntry {
   stops: OptimizationPlanStop[];
 }
 
+export interface ConflictDetected {
+  type: string;
+  section_name: string;
+  section_id: string;
+  capacity: number;
+  competing_trains: number;
+  train_numbers: string[];
+  headway_required_minutes: number;
+}
+
+export interface DecisionMade {
+  priority_train: string;
+  priority_train_id: string;
+  yielded_train: string;
+  yielded_train_id: string;
+  section_name: string;
+  section_id: string;
+  action: string;
+  reason: string;
+  explanation: string;
+  headway_minutes: number;
+}
+
+export interface ObjectiveImprovement {
+  previous_weighted_delay: number;
+  optimized_weighted_delay: number;
+  delay_reduction: number;
+  improvement_percent: number;
+}
+
+export interface TrainAction {
+  train_id: string;
+  train_number: string;
+  action: string;
+  reason: string;
+  delay_change: number;
+  final_delay_minutes: number;
+  stops_adjusted: number;
+}
+
+export interface OptimizationExplanation {
+  conflicts_detected: ConflictDetected[];
+  decisions_made: DecisionMade[];
+  objective_improvement: ObjectiveImprovement;
+  train_actions: TrainAction[];
+}
+
 export interface OptimizationPlan {
   available: boolean;
   message?: string;
@@ -95,4 +142,5 @@ export interface OptimizationPlan {
   total_weighted_delay: number;
   solver_runtime_seconds?: number;
   plan: OptimizationPlanEntry[];
+  explanation?: OptimizationExplanation;
 }

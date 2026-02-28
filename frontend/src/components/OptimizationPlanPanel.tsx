@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { CheckCircle, Clock, AlertTriangle, ChevronDown, ChevronUp, Zap, PlayCircle } from 'lucide-react';
+import { CheckCircle, Clock, AlertTriangle, ChevronDown, ChevronUp, Zap, PlayCircle, TrendingDown, AlertCircle } from 'lucide-react';
 import { api } from '../api';
 import { OptimizationPlan, OptimizationPlanEntry } from '../types';
 import { cn } from '../utils/cn';
@@ -176,6 +176,76 @@ export function OptimizationPlanPanel({ refreshTrigger }: OptimizationPlanPanelP
                     <span className="font-semibold">
                         Total weighted delay: {plan.total_weighted_delay?.toFixed(1)} min
                     </span>
+                </div>
+            )}
+
+            {/* Explanation Section */}
+            {plan?.available && plan.explanation && (
+                <div className="px-6 py-4 bg-gradient-to-br from-blue-50 to-indigo-50 border-b border-blue-100">
+                    {/* Objective Improvement */}
+                    {plan.explanation.objective_improvement && (
+                        <div className="mb-4 flex items-center gap-4">
+                            <div className="flex items-center gap-2">
+                                <TrendingDown className="w-5 h-5 text-emerald-600" />
+                                <div>
+                                    <div className="text-xs text-zinc-600 font-medium">Delay Reduction</div>
+                                    <div className="text-lg font-bold text-emerald-700">
+                                        {plan.explanation.objective_improvement.improvement_percent.toFixed(1)}%
+                                    </div>
+                                </div>
+                            </div>
+                            <div className="text-xs text-zinc-600">
+                                <span className="font-semibold">{plan.explanation.objective_improvement.delay_reduction.toFixed(1)} min</span> saved
+                                <span className="text-zinc-400 mx-1">•</span>
+                                {plan.explanation.objective_improvement.previous_weighted_delay.toFixed(1)} → {plan.explanation.objective_improvement.optimized_weighted_delay.toFixed(1)} min
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Conflicts Detected */}
+                    {plan.explanation.conflicts_detected && plan.explanation.conflicts_detected.length > 0 && (
+                        <div className="mb-3">
+                            <div className="text-xs font-semibold text-zinc-700 mb-2 flex items-center gap-1.5">
+                                <AlertCircle className="w-3.5 h-3.5 text-amber-600" />
+                                Conflicts Resolved ({plan.explanation.conflicts_detected.length})
+                            </div>
+                            <div className="space-y-1.5">
+                                {plan.explanation.conflicts_detected.map((conflict, i) => (
+                                    <div key={i} className="text-xs bg-white rounded-lg px-3 py-2 border border-blue-100">
+                                        <div className="font-medium text-zinc-800">
+                                            Section: <span className="text-blue-700">{conflict.section_name}</span>
+                                        </div>
+                                        <div className="text-zinc-600 mt-0.5">
+                                            {conflict.competing_trains} trains competing • {conflict.train_numbers.join(', ')}
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Decisions Made */}
+                    {plan.explanation.decisions_made && plan.explanation.decisions_made.length > 0 && (
+                        <div>
+                            <div className="text-xs font-semibold text-zinc-700 mb-2">
+                                Decisions ({plan.explanation.decisions_made.length})
+                            </div>
+                            <div className="space-y-1.5">
+                                {plan.explanation.decisions_made.slice(0, 3).map((decision, i) => (
+                                    <div key={i} className="text-xs bg-white rounded-lg px-3 py-2 border border-blue-100">
+                                        <div className="text-zinc-700 leading-relaxed">
+                                            {decision.explanation}
+                                        </div>
+                                    </div>
+                                ))}
+                                {plan.explanation.decisions_made.length > 3 && (
+                                    <div className="text-xs text-zinc-500 text-center pt-1">
+                                        +{plan.explanation.decisions_made.length - 3} more decisions
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                    )}
                 </div>
             )}
 

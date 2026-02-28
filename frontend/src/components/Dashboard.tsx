@@ -265,7 +265,7 @@ export function Dashboard() {
               <Activity className="w-4 h-4 text-zinc-400" />
             </div>
             <div className="flex-1 space-y-4 overflow-y-auto p-6 pt-4 pr-2">
-              {runs.map((run) => (
+              {runs.slice(0, 5).map((run) => (
                 <div key={run.id} className="flex items-start gap-4 p-4 rounded-xl border border-zinc-100 bg-zinc-50/50">
                   <div className={cn(
                     "w-2 h-2 rounded-full mt-1.5",
