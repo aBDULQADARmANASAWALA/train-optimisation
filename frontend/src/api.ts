@@ -19,7 +19,7 @@ export const api = {
         const trains: Train[] = data.trains.map((t: any) => ({
             id: t.train_id,
             name: t.train_number || t.train_id,
-            type: 'passenger', // Defaulting to passenger if not in backend
+            type: t.train_type || 'Unknown',
             currentSection: t.current_section_id || 'TERMINAL',
             priorityWeight: t.priority_weight,
             predictedDelayMinutes: t.accumulated_delay_minutes,

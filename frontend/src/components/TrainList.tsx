@@ -1,9 +1,26 @@
+import { useState, useMemo } from 'react';
 import { Train, AlertCircle, CheckCircle2, Clock } from 'lucide-react';
 import { useLiveData } from '../context/LiveDataContext';
 import { cn } from '../utils/cn';
 
 export function TrainList() {
   const { trains } = useLiveData();
+  const [searchQuery, setSearchQuery] = useState('');
+  const [typeFilter, setTypeFilter] = useState('All Types');
+
+  const filteredTrains = useMemo(() => {
+    return trains.filter(train => {
+      const q = searchQuery.toLowerCase();
+      const matchesSearch = train.name.toLowerCase().includes(q) || train.id.toLowerCase().includes(q);
+      const matchesType = typeFilter === 'All Types' || train.type.toLowerCase() === typeFilter.toLowerCase();
+      return matchesSearch && matchesType;
+    });
+  }, [trains, searchQuery, typeFilter]);
+
+  const uniqueTrainTypes = useMemo(() => {
+    const types = new Set(trains.map(t => t.type).filter(Boolean));
+    return Array.from(types).sort();
+  }, [trains]);
 
   return (
     <div className="p-8 max-w-7xl mx-auto">
@@ -13,16 +30,22 @@ export function TrainList() {
           <p className="text-sm text-zinc-500 mt-1">Live tracking and predicted delays</p>
         </div>
         <div className="flex gap-2">
-          <input 
-            type="text" 
-            placeholder="Search trains..." 
+          <input
+            type="text"
+            placeholder="Search trains by name..."
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
             className="px-4 py-2 border border-zinc-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 w-64"
           />
-          <select className="px-4 py-2 border border-zinc-200 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500">
+          <select
+            value={typeFilter}
+            onChange={(e) => setTypeFilter(e.target.value)}
+            className="px-4 py-2 border border-zinc-200 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500"
+          >
             <option>All Types</option>
-            <option>Express</option>
-            <option>Passenger</option>
-            <option>Freight</option>
+            {uniqueTrainTypes.map(type => (
+              <option key={type} value={type}>{type}</option>
+            ))}
           </select>
         </div>
       </div>
@@ -42,7 +65,13 @@ export function TrainList() {
               </tr>
             </thead>
             <tbody className="divide-y divide-zinc-100">
-              {trains.map((train) => (
+              {filteredTrains.length === 0 ? (
+                <tr>
+                  <td colSpan={7} className="px-6 py-8 text-center text-sm text-zinc-500">
+                    No trains found matching your search.
+                  </td>
+                </tr>
+              ) : filteredTrains.map((train) => (
                 <tr key={train.id} className="hover:bg-zinc-50/50 transition-colors group">
                   <td className="px-6 py-4 whitespace-nowrap">
                     <div className="flex items-center gap-3">
@@ -67,8 +96,8 @@ export function TrainList() {
                     <div className="flex items-center gap-1.5">
                       <div className="flex space-x-0.5">
                         {[...Array(5)].map((_, i) => (
-                          <div 
-                            key={i} 
+                          <div
+                            key={i}
                             className={cn(
                               "w-1.5 h-3 rounded-full",
                               i < (train.priorityWeight / 2) ? "bg-blue-500" : "bg-zinc-200"
@@ -83,13 +112,13 @@ export function TrainList() {
                     <div className="flex items-center gap-2">
                       <Clock className={cn(
                         "w-4 h-4",
-                        train.predictedDelayMinutes > 10 ? "text-red-500" : 
-                        train.predictedDelayMinutes > 0 ? "text-amber-500" : "text-emerald-500"
+                        train.predictedDelayMinutes > 10 ? "text-red-500" :
+                          train.predictedDelayMinutes > 0 ? "text-amber-500" : "text-emerald-500"
                       )} />
                       <span className={cn(
                         "text-sm font-medium",
-                        train.predictedDelayMinutes > 10 ? "text-red-600" : 
-                        train.predictedDelayMinutes > 0 ? "text-amber-600" : "text-emerald-600"
+                        train.predictedDelayMinutes > 10 ? "text-red-600" :
+                          train.predictedDelayMinutes > 0 ? "text-amber-600" : "text-emerald-600"
                       )}>
                         {train.predictedDelayMinutes > 0 ? `+${train.predictedDelayMinutes} min` : 'On Time'}
                       </span>
@@ -99,8 +128,8 @@ export function TrainList() {
                     <span className={cn(
                       "inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border",
                       train.status === 'on_time' ? "bg-emerald-50 text-emerald-700 border-emerald-200" :
-                      train.status === 'delayed' ? "bg-amber-50 text-amber-700 border-amber-200" :
-                      "bg-red-50 text-red-700 border-red-200"
+                        train.status === 'delayed' ? "bg-amber-50 text-amber-700 border-amber-200" :
+                          "bg-red-50 text-red-700 border-red-200"
                     )}>
                       {train.status === 'on_time' ? <CheckCircle2 className="w-3.5 h-3.5" /> : <AlertCircle className="w-3.5 h-3.5" />}
                       {train.status.replace('_', ' ').toUpperCase()}

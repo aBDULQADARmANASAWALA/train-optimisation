@@ -1,4 +1,4 @@
-export type TrainType = 'express' | 'passenger' | 'freight';
+export type TrainType = string;
 
 export interface Train {
   id: string;

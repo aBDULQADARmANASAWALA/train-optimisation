@@ -129,6 +129,7 @@ class TrainInfo(BaseModel):
     """Train information in state"""
     train_id: str
     train_number: str
+    train_type: Optional[str] = None
     priority_weight: float
     status: str
     accumulated_delay_minutes: float
@@ -365,6 +366,9 @@ async def get_live_state(
             TrainInfo(
                 train_id=str(pos["train_id"]),
                 train_number=pos.get("train_number", ""),
+                train_type=pos.get("train_type") or state_engine.trains.get(
+                    UUID(str(pos["train_id"])), {}
+                ).get("train_type", "Unknown"),
                 priority_weight=state_engine.trains.get(
                     UUID(str(pos["train_id"])), {}
                 ).get("priority_weight", 1.0),

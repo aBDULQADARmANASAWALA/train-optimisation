@@ -423,6 +423,7 @@ class RailwayStateEngine:
             train_positions.append({
                 "train_id": str(train_id),
                 "train_number": train_info.get("train_number"),
+                "train_type": train_info.get("train_type") or train_info.get("type"),
                 "status": train_info.get("status"),
                 "current_section_id": current_section,
                 "current_station_id": current_station,
