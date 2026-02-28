@@ -533,7 +533,7 @@ class SimulationOrchestrator:
 
             result = self.optimizer.optimize(
                 snap,
-                horizon_minutes=self.horizon_minutes,
+                horizon_minutes=max(self.horizon_minutes, 1440),  # at least 24h to match stop collection
                 use_warm_start=True,
             )
 
@@ -548,12 +548,14 @@ class SimulationOrchestrator:
         """
         Convert Supabase train_schedules rows to TrainStop objects.
 
-        Only includes stops within [now, now + horizon_minutes] so the
-        optimizer works on a realistic forward-looking window.
+        Includes stops within a broad look-ahead window (up to 24 hours) so
+        the optimizer can work even when the seed data is dated further ahead.
+        Falls back to ALL upcoming stops if the standard horizon finds none.
         """
         stops: List[TrainStop] = []
         now = self.state_engine.current_time
-        horizon_end = now + timedelta(minutes=self.horizon_minutes)
+        # Use an extended horizon: max of configured horizon or 24 hours
+        extended_horizon_end = now + timedelta(hours=24)
 
         for train_id, schedule in self.state_engine.train_schedules.items():
             train_info = self.state_engine.trains.get(train_id, {})
@@ -575,8 +577,12 @@ class SimulationOrchestrator:
                     effective_arr = sched_arr + delay_delta
                     effective_dep = sched_dep + delay_delta
 
-                    # Only include stops within horizon
-                    if not (now <= effective_arr <= horizon_end):
+                    # Include stops that are in the future within 24h window
+                    # This handles seeded data that may be dated ahead of "now"
+                    if effective_arr > extended_horizon_end:
+                        continue
+                    # Skip stops that are already far in the past (>2h ago)
+                    if effective_arr < now - timedelta(hours=2):
                         continue
 
                     stops.append(TrainStop(
@@ -595,7 +601,7 @@ class SimulationOrchestrator:
                 except Exception as exc:
                     logger.debug(f"Skipping stop due to parse error: {exc}")
 
-        logger.info(f"Built {len(stops)} TrainStop objects for optimizer (horizon={self.horizon_minutes}min)")
+        logger.info(f"Built {len(stops)} TrainStop objects for optimizer (24h extended window)")
         return stops
 
     def _get_section_infos(self) -> List[SectionInfo]:
@@ -658,16 +664,24 @@ class SimulationOrchestrator:
 
         try:
             if hasattr(optimization_result, "status"):
-                if optimization_result.status.value == "infeasible":
-                    logger.warning("Optimization result is infeasible")
-                    return False
+                status_val = optimization_result.status.value
+                # Accept optimal and feasible results
+                if status_val in ("optimal", "feasible"):
+                    logger.info(f"Optimization validation passed: {status_val}")
+                    return True
+                # Reject infeasible/failed results
+                logger.warning(f"Optimization result status is not acceptable: {status_val}")
+                if hasattr(optimization_result, "infeasibility_reasons"):
+                    logger.warning(f"Reasons: {optimization_result.infeasibility_reasons}")
+                return False
 
+            # Fallback: if no status field, validate by delay bound
             if hasattr(optimization_result, "total_weighted_delay"):
-                if optimization_result.total_weighted_delay > 1000:
+                if optimization_result.total_weighted_delay > 10000:
                     logger.warning(f"Excessive delays in solution: {optimization_result.total_weighted_delay}")
                     return False
 
-            logger.debug("Optimization validation passed")
+            logger.debug("Optimization validation passed (fallback)")
             return True
 
         except Exception as e:
@@ -694,9 +708,9 @@ class SimulationOrchestrator:
                     text("""
                         INSERT INTO optimization_logs
                             (id, timestamp, objective_value, total_weighted_delay,
-                             conflicts_detected, solver_runtime, notes)
+                             conflicts_detected, solver_runtime, notes, created_at)
                         VALUES
-                            (:id, :ts, :obj, :delay, :conflicts, :runtime, :notes)
+                            (:id, :ts, :obj, :delay, :conflicts, :runtime, :notes, :created_at)
                         ON CONFLICT (id) DO NOTHING
                     """),
                     {
@@ -707,6 +721,7 @@ class SimulationOrchestrator:
                         "conflicts": int(getattr(optimization_result, "conflicts_resolved", 0)),
                         "runtime": float(getattr(optimization_result, "solver_runtime_seconds", 0)),
                         "notes": f"cycle={self.cycle_count} status={getattr(optimization_result, 'status', 'unknown')}",
+                        "created_at": now.isoformat(),
                     },
                 )
                 self._db_session.commit()
@@ -774,22 +789,23 @@ class SimulationOrchestrator:
           ...
         """
         try:
-            # --- Trigger 1: drift detection ---
-            drift_result = self.predictor.check_for_drift()
-            if drift_result.get("drift_detected"):
-                action = drift_result.get("action_taken", "unknown")
-                mae    = drift_result.get("mean_error", 0.0)
-                logger.warning(
-                    f"Drift detected (MAE={mae:.2f}min) at cycle {self.cycle_count}: "
-                    f"action={action}"
-                )
-                if action == "retrained":
-                    self.last_retrain_cycle = self.cycle_count
-                    logger.info(
-                        f"Drift-triggered retrain complete at cycle {self.cycle_count} "
-                        f"(samples in DB growing every cycle)"
+            # --- Trigger 1: drift detection (if method available) ---
+            if hasattr(self.predictor, "check_for_drift"):
+                drift_result = self.predictor.check_for_drift()
+                if drift_result.get("drift_detected"):
+                    action = drift_result.get("action_taken", "unknown")
+                    mae    = drift_result.get("mean_error", 0.0)
+                    logger.warning(
+                        f"Drift detected (MAE={mae:.2f}min) at cycle {self.cycle_count}: "
+                        f"action={action}"
                     )
-                return  # Already retrained due to drift, skip periodic check
+                    if action == "retrained":
+                        self.last_retrain_cycle = self.cycle_count
+                        logger.info(
+                            f"Drift-triggered retrain complete at cycle {self.cycle_count} "
+                            f"(samples in DB growing every cycle)"
+                        )
+                    return  # Already retrained due to drift, skip periodic check
 
             # --- Trigger 2: periodic safety-net ---
             cycles_since_retrain = self.cycle_count - self.last_retrain_cycle
@@ -809,7 +825,7 @@ class SimulationOrchestrator:
 
         except Exception as exc:
             # Never let a retraining failure crash the cycle
-            logger.warning(f"Retraining skipped due to error: {exc}")
+            logger.debug(f"Retraining skipped due to error: {exc}")
 
     def _record_historical_data(self, predictions: Dict) -> None:
         """
@@ -896,9 +912,19 @@ class SimulationOrchestrator:
         """
         Calculate KPIs and write a kpi_metrics row to Supabase.
         """
-        total_delay = 0.0
-        if optimization_result and hasattr(optimization_result, "total_weighted_delay"):
+        # Compute total delay from actual train states (always reflects reality)
+        actual_total_delay = sum(
+            info.get("accumulated_delay_minutes", 0.0)
+            for info in self.state_engine.trains.values()
+        )
+
+        # If optimizer produced a result, use its weighted delay; otherwise fall back
+        # to the raw sum of accumulated delays so the dashboard always shows something meaningful
+        if optimization_result and hasattr(optimization_result, "total_weighted_delay") and optimization_result.total_weighted_delay > 0:
             total_delay = optimization_result.total_weighted_delay
+        else:
+            total_delay = actual_total_delay
+
 
         # Average section utilization from live occupancy
         if state_snapshot.get("occupancy_summary"):

@@ -1,8 +1,3 @@
-/**
- * @license
- * SPDX-License-Identifier: Apache-2.0
- */
-
 import { useState } from 'react';
 import { Sidebar } from './components/Sidebar';
 import { Header } from './components/Header';
@@ -11,11 +6,13 @@ import { TrainList } from './components/TrainList';
 import { NetworkMap } from './components/NetworkMap';
 import { ScheduleView } from './components/ScheduleView';
 import { LogsView } from './components/LogsView';
-import { LiveDataProvider } from './context/LiveDataContext';
+import { LiveDataProvider, useLiveData } from './context/LiveDataContext';
+import { LoadingOverlay } from './components/LoadingOverlay';
 
-export default function App() {
+function AppLayout() {
   const [activeTab, setActiveTab] = useState('dashboard');
   const [systemStatus, setSystemStatus] = useState<'running' | 'frozen'>('running');
+  const { loading } = useLiveData();
 
   const renderContent = () => {
     switch (activeTab) {
@@ -35,11 +32,12 @@ export default function App() {
   };
 
   return (
-    <LiveDataProvider>
+    <>
+      {loading && <LoadingOverlay message="Loading data from Supabase..." />}
       <div className="flex h-screen bg-zinc-50 font-sans text-zinc-900 overflow-hidden">
-        <Sidebar 
-          activeTab={activeTab} 
-          setActiveTab={setActiveTab} 
+        <Sidebar
+          activeTab={activeTab}
+          setActiveTab={setActiveTab}
           systemStatus={systemStatus}
           setSystemStatus={setSystemStatus}
         />
@@ -50,6 +48,14 @@ export default function App() {
           </main>
         </div>
       </div>
+    </>
+  );
+}
+
+export default function App() {
+  return (
+    <LiveDataProvider>
+      <AppLayout />
     </LiveDataProvider>
   );
 }

@@ -1,0 +1,50 @@
+﻿python : 2026-02-28 22:36:14 - app.main - INFO - 
+Routes registered: 13 routes
+At line:1 char:13
++ cd backend; python test_opt.py > out_opt.txt 
+2>&1
++             
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (202 
+   6-02-28 22:3...ered: 13 routes:String) [], R  
+  emoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+2026-02-28 22:36:14 - app.main - INFO - FastAPI 
+app created: Railway Optimization System v1.0.0 
+| Environment: development
+2026-02-28 22:36:21 - app.services.state_engine 
+- INFO - Network built: 9 stations, 8 sections
+2026-02-28 22:36:25 - app.services.state_engine 
+- INFO - Loaded 8 active trains
+2026-02-28 22:36:25 - app.services.predictor - 
+INFO - PredictionService initialized
+2026-02-28 22:36:25 - app.services.simulator - 
+INFO - SimulationOrchestrator initialized
+2026-02-28 22:36:25 - app.services.simulator - 
+INFO - === Starting Orchestration Cycle 1 ===
+2026-02-28 22:36:25 - app.services.state_engine 
+- INFO - Conflict detection: 0 capacity, 0 
+headway, 0 platform
+2026-02-28 22:36:26 - app.services.simulator - 
+INFO - Built 0 TrainStop objects for optimizer 
+(horizon=60min)
+2026-02-28 22:36:29 - app.services.simulator - 
+INFO - Built 8 SectionInfo objects for optimizer
+2026-02-28 22:36:29 - app.services.simulator - 
+WARNING - No train stops found in scheduling 
+horizon ù skipping optimization
+2026-02-28 22:36:29 - app.services.simulator - 
+WARNING - No optimization result to validate
+2026-02-28 22:36:29 - app.services.simulator - 
+WARNING - Validation failed ù schedule not 
+persisted
+2026-02-28 22:36:29 - app.services.simulator - 
+WARNING - Retraining skipped due to error: 
+'PredictionService' object has no attribute 
+'check_for_drift'
+2026-02-28 22:36:30 - app.services.simulator - 
+INFO - Cycle 1 complete: 
+status=validation_failed, weighted_delay=0.0min, 
+utilization=0.0%, runtime=4.40s
+STATUS: ExecutionStatus.VALIDATION_FAILED

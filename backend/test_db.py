@@ -1,6 +1,5 @@
-import json
+import os, json
 from sqlalchemy import create_engine, inspect
-import os
 from dotenv import load_dotenv
 
 load_dotenv(".env")
@@ -8,10 +7,8 @@ engine = create_engine(os.getenv("DATABASE_URL"))
 inspector = inspect(engine)
 
 data = {
-    "train_schedules": [c["name"] for c in inspector.get_columns("train_schedules")],
-    "train_states": [c["name"] for c in inspector.get_columns("train_states")],
-    "trains": [c["name"] for c in inspector.get_columns("trains")]
+    "optimization_logs": [c["name"] for c in inspector.get_columns("optimization_logs")] if "optimization_logs" in inspector.get_table_names() else []
 }
 
-with open("result.json", "w") as f:
+with open("opt_logs.json", "w") as f:
     json.dump(data, f)
