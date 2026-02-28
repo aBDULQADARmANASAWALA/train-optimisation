@@ -1,0 +1,5 @@
+{
+  "name": "RailOrchestra",
+  "description": "Railway orchestration system dashboard for live tracking, ML predictions, and CP-SAT optimization.",
+  "requestFramePermissions": []
+}
