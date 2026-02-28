@@ -107,7 +107,11 @@ export function TrainList() {
                     </span>
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
-                    <button className="text-blue-600 hover:text-blue-900 opacity-0 group-hover:opacity-100 transition-opacity">
+                    <button
+                      disabled
+                      title="Detail view coming soon"
+                      className="text-zinc-400 cursor-not-allowed opacity-0 group-hover:opacity-100 transition-opacity"
+                    >
                       View Details
                     </button>
                   </td>

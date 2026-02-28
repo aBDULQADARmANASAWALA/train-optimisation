@@ -16,6 +16,7 @@ type InjectState = 'idle' | 'loading' | 'success' | 'error';
 export function Sidebar({ activeTab, setActiveTab, systemStatus, setSystemStatus, onConflictsInjected }: SidebarProps) {
   const [injectState, setInjectState] = useState<InjectState>('idle');
   const [injectMsg, setInjectMsg] = useState<string>('');
+  const [overrideLoading, setOverrideLoading] = useState(false);
 
   const navItems = [
     { id: 'dashboard', label: 'Dashboard', icon: Activity },
@@ -133,15 +134,36 @@ export function Sidebar({ activeTab, setActiveTab, systemStatus, setSystemStatus
             Dispatcher can freeze the system and fallback to last known good schedule.
           </p>
           <button
-            onClick={() => setSystemStatus(systemStatus === 'running' ? 'frozen' : 'running')}
+            onClick={async () => {
+              if (overrideLoading) return;
+              setOverrideLoading(true);
+              const newStatus = systemStatus === 'running' ? 'frozen' : 'running';
+              try {
+                const res = await fetch('http://localhost:8010/api/v1/override', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    enabled: newStatus === 'frozen',
+                    reason: newStatus === 'frozen' ? 'Dispatcher manual override' : 'Resuming automated operations',
+                  }),
+                });
+                if (res.ok) setSystemStatus(newStatus);
+              } catch (err) {
+                console.error('Override API call failed:', err);
+              } finally {
+                setOverrideLoading(false);
+              }
+            }}
+            disabled={overrideLoading}
             className={cn(
               "w-full py-2 px-3 rounded text-xs font-semibold transition-colors border",
               systemStatus === 'running'
                 ? "bg-red-500/10 text-red-500 hover:bg-red-500/20 border-red-500/20"
-                : "bg-emerald-500/10 text-emerald-500 hover:bg-emerald-500/20 border-emerald-500/20"
+                : "bg-emerald-500/10 text-emerald-500 hover:bg-emerald-500/20 border-emerald-500/20",
+              overrideLoading && "opacity-50 cursor-not-allowed"
             )}
           >
-            {systemStatus === 'running' ? 'MANUAL OVERRIDE' : 'RESUME SYSTEM'}
+            {overrideLoading ? 'Processing...' : systemStatus === 'running' ? 'MANUAL OVERRIDE' : 'RESUME SYSTEM'}
           </button>
         </div>
       </div>

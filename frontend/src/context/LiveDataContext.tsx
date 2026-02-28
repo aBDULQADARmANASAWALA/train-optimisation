@@ -1,5 +1,5 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
-import { Train, Section, Conflict, Platform, OptimizationRun, KPIDashboard } from '../types';
+import React, { createContext, useContext, useState, useEffect, useRef } from 'react';
+import { Train, Section, Conflict, Platform, OptimizationRun, KPIDashboard, OptimizationPlan } from '../types';
 import { api } from '../api';
 
 interface LiveData {
@@ -9,6 +9,7 @@ interface LiveData {
   platforms: Platform[];
   runs: OptimizationRun[];
   metrics: KPIDashboard | null;
+  plan: OptimizationPlan | null;
   loading: boolean;
   error: string | null;
   refreshData: () => Promise<void>;
@@ -23,6 +24,7 @@ type DataState = {
   platforms: Platform[];
   runs: OptimizationRun[];
   metrics: KPIDashboard | null;
+  plan: OptimizationPlan | null;
 };
 
 const EMPTY_STATE: DataState = {
@@ -32,6 +34,7 @@ const EMPTY_STATE: DataState = {
   platforms: [],
   runs: [],
   metrics: null,
+  plan: null,
 };
 
 function loadCache(): DataState {
@@ -48,59 +51,72 @@ export function LiveDataProvider({ children }: { children: React.ReactNode }) {
   const [data, setData] = useState<DataState>(loadCache);
   const [loading, setLoading] = useState(() => !localStorage.getItem('railOrchestraCache'));
   const [error, setError] = useState<string | null>(null);
+  const refreshInFlight = useRef(false);
 
   const refreshData = async () => {
-    // Fire all three requests in parallel — allSettled means a single failure
-    // never blocks the others (e.g. /history 500 won't prevent live state update)
-    const [liveResult, historyResult, metricsResult] = await Promise.allSettled([
-      api.getLiveState(),
-      api.getOptimizationHistory(),
-      api.getMetrics(),
-    ]);
+    // Guard: skip if a previous refresh is still in-flight (prevents overlapping fetches)
+    if (refreshInFlight.current) return;
+    refreshInFlight.current = true;
+    try {
+      const [liveResult, historyResult, metricsResult, planResult] = await Promise.allSettled([
+        api.getLiveState(),
+        api.getOptimizationHistory(),
+        api.getMetrics(),
+        api.getOptimizationPlan(),
+      ]);
 
-    setData(prev => {
-      const next = { ...prev };
-      let changed = false;
+      setData(prev => {
+        const next = { ...prev };
+        let changed = false;
+
+        if (liveResult.status === 'fulfilled') {
+          next.trains = liveResult.value.trains;
+          next.sections = liveResult.value.sections;
+          next.conflicts = liveResult.value.conflicts;
+          next.platforms = liveResult.value.platforms;
+          changed = true;
+        } else {
+          console.warn('[refresh] getLiveState failed:', (liveResult.reason as Error)?.message);
+        }
+
+        if (historyResult.status === 'fulfilled') {
+          next.runs = historyResult.value;
+          changed = true;
+        } else {
+          console.warn('[refresh] getOptimizationHistory failed:', (historyResult.reason as Error)?.message);
+        }
+
+        if (metricsResult.status === 'fulfilled') {
+          next.metrics = metricsResult.value;
+          changed = true;
+        } else {
+          console.warn('[refresh] getMetrics failed:', (metricsResult.reason as Error)?.message);
+        }
+
+        if (planResult.status === 'fulfilled') {
+          next.plan = planResult.value;
+          changed = true;
+        } else {
+          console.warn('[refresh] getOptimizationPlan failed:', (planResult.reason as Error)?.message);
+        }
+
+        if (changed) {
+          try { localStorage.setItem('railOrchestraCache', JSON.stringify(next)); } catch { }
+        }
+
+        return next;
+      });
 
       if (liveResult.status === 'fulfilled') {
-        next.trains = liveResult.value.trains;
-        next.sections = liveResult.value.sections;
-        next.conflicts = liveResult.value.conflicts;
-        next.platforms = liveResult.value.platforms;
-        changed = true;
+        setError(null);
       } else {
-        console.warn('[refresh] getLiveState failed:', (liveResult.reason as Error)?.message);
+        setError('Could not reach backend API');
       }
 
-      if (historyResult.status === 'fulfilled') {
-        next.runs = historyResult.value;
-        changed = true;
-      } else {
-        console.warn('[refresh] getOptimizationHistory failed:', (historyResult.reason as Error)?.message);
-      }
-
-      if (metricsResult.status === 'fulfilled') {
-        next.metrics = metricsResult.value;
-        changed = true;
-      } else {
-        console.warn('[refresh] getMetrics failed:', (metricsResult.reason as Error)?.message);
-      }
-
-      if (changed) {
-        try { localStorage.setItem('railOrchestraCache', JSON.stringify(next)); } catch { }
-      }
-
-      return next;
-    });
-
-    // Clear error if at least live state succeeded
-    if (liveResult.status === 'fulfilled') {
-      setError(null);
-    } else {
-      setError('Could not reach backend API');
+      setLoading(false);
+    } finally {
+      refreshInFlight.current = false;
     }
-
-    setLoading(false);
   };
 
   useEffect(() => {

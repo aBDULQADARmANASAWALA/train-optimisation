@@ -1,5 +1,5 @@
-import { Activity, AlertOctagon, TrendingDown, Clock, Train, Map, AlertTriangle } from 'lucide-react';
-import { AreaChart, Area, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
+import { Activity, AlertOctagon, TrendingDown, Clock, Map } from 'lucide-react';
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import { useLiveData } from '../context/LiveDataContext';
 import { cn } from '../utils/cn';
 import { useState } from 'react';
@@ -7,27 +7,16 @@ import { api } from '../api';
 import { LoadingOverlay } from './LoadingOverlay';
 import { OptimizationPlanPanel } from './OptimizationPlanPanel';
 
-const trendData = [
-  { time: '10:00', delay: 120 },
-  { time: '10:05', delay: 110 },
-  { time: '10:10', delay: 90 },
-  { time: '10:15', delay: 130 },
-  { time: '10:20', delay: 85 },
-  { time: '10:25', delay: 60 },
-  { time: '10:30', delay: 45 },
-];
 
 export function Dashboard() {
-  const { trains, sections, conflicts, runs, metrics, loading, error, refreshData } = useLiveData();
+  const { trains, sections, conflicts, runs, refreshData } = useLiveData();
   const [isOptimizing, setIsOptimizing] = useState(false);
-  const [planRefreshTrigger, setPlanRefreshTrigger] = useState(0);
 
   const handleOptimization = async () => {
     try {
       setIsOptimizing(true);
       await api.runOptimization();
       await refreshData();
-      setPlanRefreshTrigger(t => t + 1); // reload the plan panel
     } catch (err) {
       console.error("Failed to run optimization:", err);
       alert("Failed to run optimization. Check console for details.");
@@ -37,15 +26,14 @@ export function Dashboard() {
   };
 
   const activeConflicts = conflicts.filter(c => !c.resolved);
-  // Use backend metrics total when available (more accurate - reflects actual DB state)
-  // Fall back to summing client-side train delays
-  const totalDelay = metrics
-    ? Math.round(metrics.total_weighted_delay_minutes)
-    : Math.round(trains.reduce((acc, t) => acc + t.predictedDelayMinutes, 0));
+  // Single source of truth: always derive total delay from the live train data
+  // returned by /state/live (which reads accumulated_delay_minutes from DB).
+  // This is the same DB column that /metrics reads, so they stay consistent.
+  const totalDelay = Math.round(trains.reduce((acc, t) => acc + t.predictedDelayMinutes, 0));
   const congestedSections = sections.filter(s => s.status === 'congested' || s.status === 'blocked').length;
 
-  // Cumulative delay saved by all optimization runs
-  const totalDelayReduced = runs.reduce((acc, r) => acc + r.totalDelayReduced, 0);
+  // Total conflicts resolved across all optimization runs (from optimization_logs.conflicts_detected)
+  const totalConflictsResolved = runs.reduce((acc, r) => acc + r.conflictsResolved, 0);
 
   const delayData = trains.map(t => ({
     name: t.name || t.id,
@@ -60,7 +48,11 @@ export function Dashboard() {
         <div className="flex items-center justify-between">
           <h2 className="text-2xl font-bold text-zinc-900 tracking-tight">System Overview</h2>
           <div className="flex gap-2">
-            <button className="px-4 py-2 bg-white border border-zinc-200 rounded-lg text-sm font-medium text-zinc-700 hover:bg-zinc-50 transition-colors shadow-sm">
+            <button
+              disabled
+              title="Export functionality coming soon"
+              className="px-4 py-2 bg-white border border-zinc-200 rounded-lg text-sm font-medium text-zinc-400 cursor-not-allowed shadow-sm"
+            >
               Export Report
             </button>
             <button
@@ -121,14 +113,14 @@ export function Dashboard() {
 
           <div className="bg-white p-6 rounded-2xl border border-zinc-200 shadow-sm flex flex-col gap-4">
             <div className="flex items-center justify-between">
-              <h3 className="text-sm font-medium text-zinc-500">Delay Avoided (Cumulative)</h3>
+              <h3 className="text-sm font-medium text-zinc-500">Conflicts Resolved</h3>
               <div className="w-8 h-8 rounded-full bg-emerald-50 flex items-center justify-center">
                 <TrendingDown className="w-4 h-4 text-emerald-500" />
               </div>
             </div>
             <div className="flex items-end gap-2">
-              <span className="text-4xl font-light text-zinc-900">{Math.round(totalDelayReduced)}</span>
-              <span className="text-sm text-emerald-500 font-medium mb-1">minutes saved</span>
+              <span className="text-4xl font-light text-zinc-900">{totalConflictsResolved}</span>
+              <span className="text-sm text-emerald-500 font-medium mb-1">across {runs.length} runs</span>
             </div>
           </div>
         </div>
@@ -291,7 +283,7 @@ export function Dashboard() {
         </div>
 
         {/* Optimization Plan — full width below the grid */}
-        <OptimizationPlanPanel refreshTrigger={planRefreshTrigger} />
+        <OptimizationPlanPanel />
       </div>
     </>
   );

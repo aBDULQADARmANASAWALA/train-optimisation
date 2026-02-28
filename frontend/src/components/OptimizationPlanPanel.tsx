@@ -1,8 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { CheckCircle, Clock, AlertTriangle, ChevronDown, ChevronUp, Zap, PlayCircle, TrendingDown, AlertCircle } from 'lucide-react';
-import { api } from '../api';
-import { OptimizationPlan, OptimizationPlanEntry } from '../types';
+import { OptimizationPlanEntry } from '../types';
 import { cn } from '../utils/cn';
+import { useLiveData } from '../context/LiveDataContext';
 
 const ACTION_CONFIG = {
     on_time: { label: 'Proceed', color: 'text-emerald-700', bg: 'bg-emerald-50', border: 'border-emerald-200', icon: CheckCircle, dot: 'bg-emerald-500' },
@@ -10,7 +10,13 @@ const ACTION_CONFIG = {
     hold: { label: 'Hold Train', color: 'text-red-700', bg: 'bg-red-50', border: 'border-red-200', icon: AlertTriangle, dot: 'bg-red-500' },
 };
 
-function TrainPlanCard({ entry, index }: { entry: OptimizationPlanEntry; index: number }) {
+interface TrainPlanCardProps {
+    key?: string | number;
+    entry: OptimizationPlanEntry;
+    index: number;
+}
+
+function TrainPlanCard({ entry, index }: TrainPlanCardProps) {
     const [expanded, setExpanded] = useState(index === 0);
     const cfg = ACTION_CONFIG[entry.action] || ACTION_CONFIG.on_time;
     const Icon = cfg.icon;
@@ -103,22 +109,8 @@ function TrainPlanCard({ entry, index }: { entry: OptimizationPlanEntry; index: 
     );
 }
 
-interface OptimizationPlanPanelProps {
-    refreshTrigger: number; // bump this after each optimization run to force re-fetch
-}
-
-export function OptimizationPlanPanel({ refreshTrigger }: OptimizationPlanPanelProps) {
-    const [plan, setPlan] = useState<OptimizationPlan | null>(null);
-    const [loading, setLoading] = useState(true);
-
-    useEffect(() => {
-        let cancelled = false;
-        setLoading(true);
-        api.getOptimizationPlan()
-            .then(data => { if (!cancelled) { setPlan(data); setLoading(false); } })
-            .catch(() => { if (!cancelled) setLoading(false); });
-        return () => { cancelled = true; };
-    }, [refreshTrigger]);
+export function OptimizationPlanPanel() {
+    const { plan, loading } = useLiveData();
 
     const holdCount = plan?.plan.filter(e => e.action === 'hold').length ?? 0;
     const delayCount = plan?.plan.filter(e => e.action === 'minor_delay').length ?? 0;
