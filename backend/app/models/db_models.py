@@ -10,7 +10,7 @@ from sqlalchemy import (
     ForeignKey,
     UniqueConstraint,
     Index,
-    Enum as SQLEnum,
+    Enum,
     Text,
     TypeDecorator,
 )
@@ -282,34 +282,29 @@ class TrainState(Base):
         last_updated: Timestamp of last status update
         created_at: Timestamp when record was created
     """
-    __tablename__ = "train_states"
+    __tablename__ = "train_state"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4, nullable=False)
     train_id = Column(
         UUID(as_uuid=True),
         ForeignKey("trains.id", ondelete="CASCADE"),
+        primary_key=True,
         nullable=False,
-        unique=True,
-        index=True,
     )
     current_section_id = Column(
         UUID(as_uuid=True),
         ForeignKey("sections.id", ondelete="SET NULL"),
         nullable=True,
-        index=True,
     )
     current_station_id = Column(
         UUID(as_uuid=True),
         ForeignKey("stations.id", ondelete="SET NULL"),
         nullable=True,
-        index=True,
     )
-    status = Column(SQLEnum(TrainStatus), nullable=False, default=TrainStatus.SCHEDULED, index=True)
+    status = Column(Enum(TrainStatus, values_callable=lambda obj: [e.value for e in obj]), nullable=False, default=TrainStatus.SCHEDULED)
     actual_arrival = Column(DateTime, nullable=True)
     actual_departure = Column(DateTime, nullable=True)
     accumulated_delay_minutes = Column(Float, nullable=False, default=0.0)
     last_updated = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     # Relationships
     train = relationship("Train", back_populates="state")

@@ -1,16 +1,23 @@
-import os
-import sys
+import os, sys
+sys.path.insert(0, r'c:\Users\super\VS_CODE\MIndicatorHack\backend')
+from app.models.db_models import TrainStatus
+from dotenv import load_dotenv
+load_dotenv(r'c:\Users\super\VS_CODE\MIndicatorHack\backend\.env')
+from sqlalchemy import create_engine, text
 
-# Add backend dir to path
-sys.path.append(os.path.dirname(__file__))
+e = create_engine(os.environ.get('DATABASE_URL'), connect_args={'connect_timeout': 10})
 
-from app.main import init_db, SessionLocal
-from app.models import TrainState
+with e.begin() as c:
+    c.execute(text("UPDATE train_state SET status = 'in_transit' WHERE UPPER(status) = 'IN_TRANSIT'"))
+    c.execute(text("UPDATE train_state SET status = 'stopped' WHERE UPPER(status) = 'STOPPED'"))
+    c.execute(text("UPDATE train_state SET status = 'scheduled' WHERE UPPER(status) = 'SCHEDULED'"))
+    c.execute(text("UPDATE train_state SET status = 'completed' WHERE UPPER(status) = 'COMPLETED'"))
+    c.execute(text("UPDATE train_state SET status = 'cancelled' WHERE UPPER(status) = 'CANCELLED'"))
+    c.execute(text("UPDATE train_state SET status = 'delayed' WHERE UPPER(status) = 'DELAYED'"))
+    
+    # Just to be 100% sure, any stragglers:
+    c.execute(text("UPDATE train_state SET status = 'in_transit' WHERE UPPER(status) = 'IN TRANSIT'"))
+    c.execute(text("UPDATE train_state SET status = 'stopped' WHERE UPPER(status) = 'STATIONARY'"))
 
-init_db()
-db = SessionLocal()
-states = db.query(TrainState).all()
-for s in states:
-    s.current_section_id = None
-db.commit()
-print("Fixed current_section_id!")
+    final = c.execute(text('SELECT status FROM train_state LIMIT 5')).fetchall()
+    print([r[0] for r in final])
