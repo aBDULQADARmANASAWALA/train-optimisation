@@ -3,6 +3,7 @@ import { NetworkState, OptimizationRun, KPIDashboard, Train, Section, Optimizati
 const API_BASE_URL = 'http://localhost:8010/api/v1';
 
 let fakeConflictsCount = 0;
+let fakeRuns: OptimizationRun[] = [];
 
 async function fetchWithRetry(url: string, options: RequestInit = {}): Promise<Response> {
     const response = await fetch(url, options);
@@ -83,19 +84,36 @@ export const api = {
     },
 
     getOptimizationHistory: async (): Promise<OptimizationRun[]> => {
-        const res = await fetchWithRetry(`${API_BASE_URL}/optimization/history`);
-        const data = await res.json();
-        return data.map((run: any) => ({
-            id: run.id,
-            timestamp: run.timestamp,
-            totalDelayReduced: run.total_delay_reduced,
-            conflictsResolved: run.conflicts_resolved,
-            status: run.status
-        }));
+        try {
+            const res = await fetchWithRetry(`${API_BASE_URL}/optimization/history`);
+            const data = await res.json();
+            const baseRuns = data.map((run: any) => ({
+                id: run.id,
+                timestamp: run.timestamp,
+                totalDelayReduced: run.total_delay_reduced,
+                conflictsResolved: run.conflicts_resolved,
+                status: run.status
+            }));
+            return [...fakeRuns, ...baseRuns];
+        } catch (e) {
+            return fakeRuns;
+        }
     },
 
     runOptimization: async (): Promise<any> => {
+        const resolved = fakeConflictsCount;
         fakeConflictsCount = 0;
+
+        if (resolved > 0) {
+            fakeRuns.unshift({
+                id: `opt-${Date.now()}`,
+                timestamp: new Date().toISOString(),
+                totalDelayReduced: Math.floor(Math.random() * 20) + 10,
+                conflictsResolved: resolved,
+                status: 'success'
+            });
+        }
+
         try {
             const res = await fetchWithRetry(`${API_BASE_URL}/optimization/run`, {
                 method: 'POST',
